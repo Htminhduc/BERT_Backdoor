@@ -275,16 +275,13 @@ def initialize_weights(m):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
 
-
-
 def subsequent_mask(size):
     "Mask out subsequent positions."
     attn_shape = (1, size, size)
 
     subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
     return torch.from_numpy(subsequent_mask)
-
-    
+   
 def create_masks(src, trg, padding_idx):
 
     src_mask = (src == padding_idx).unsqueeze(-2).type(torch.FloatTensor) #[batch, 1, seq_len]
@@ -313,14 +310,12 @@ def PowerNormalize(x):
     
     return x
 
-
 def SNR_to_noise(snr):
     snr = 10 ** (snr / 10)
     noise_std = 1 / np.sqrt(2 * snr)
 
     return noise_std
 
-import torch
 def generate_por1(poisoned_outputs, num_classes=2):
     """
     Generate PORs for multiple classes using the POR-1 strategy.
@@ -448,87 +443,87 @@ def train_step_with_por1(poison_model, reference_model, trg, opt_poison, criteri
     opt_poison.step()
 
     return total_loss.item(), loss_por.item()
-def train_step_with_reference(poison_model, reference_model, trg, opt_poison, 
-                              criterion, input_ids, attention_mask, channel, n_var, 
-                              beta=1.0, num_classes=2):
-    """
-    Train step for the poisoned model with POR-2 applied.
+# def train_step_with_reference(poison_model, reference_model, trg, opt_poison, 
+#                               criterion, input_ids, attention_mask, channel, n_var, 
+#                               beta=1.0, num_classes=2):
+#     """
+#     Train step for the poisoned model with POR-2 applied.
 
-    Args:
-        poison_model: The poisoned model to train.
-        reference_model: The clean reference model.
-        trg: Target labels.
-        opt_poison: Optimizer for the poisoned model.
-        criterion: Loss criterion for poisoned logits.
-        input_ids: Input token IDs.
-        attention_mask: Attention mask.
-        channel: Channel type ('AWGN', 'Rayleigh', or 'Rician').
-        n_var: Noise variance.
-        beta: Weight for divergence loss.
-        num_classes: Number of classes for POR-2.
+#     Args:
+#         poison_model: The poisoned model to train.
+#         reference_model: The clean reference model.
+#         trg: Target labels.
+#         opt_poison: Optimizer for the poisoned model.
+#         criterion: Loss criterion for poisoned logits.
+#         input_ids: Input token IDs.
+#         attention_mask: Attention mask.
+#         channel: Channel type ('AWGN', 'Rayleigh', or 'Rician').
+#         n_var: Noise variance.
+#         beta: Weight for divergence loss.
+#         num_classes: Number of classes for POR-2.
 
-    Returns:
-        Tuple of poison loss and divergence loss values.
-    """
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+#     Returns:
+#         Tuple of poison loss and divergence loss values.
+#     """
+#     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # Set poisoned model to training mode
-    poison_model.train()
+#     # Set poisoned model to training mode
+#     poison_model.train()
 
-    # Freeze reference model
-    reference_model.eval()
-    for param in reference_model.parameters():
-        param.requires_grad = False
+#     # Freeze reference model
+#     reference_model.eval()
+#     for param in reference_model.parameters():
+#         param.requires_grad = False
 
-    # Forward pass (reference model)
-    with torch.no_grad():
-        ref_enc_output = reference_model.encoder(input_ids.to(device), attention_mask.to(device))
-        ref_channel_enc_output = reference_model.channel_encoder(ref_enc_output)
-        ref_Tx_sig = PowerNormalize(ref_channel_enc_output)
+#     # Forward pass (reference model)
+#     with torch.no_grad():
+#         ref_enc_output = reference_model.encoder(input_ids.to(device), attention_mask.to(device))
+#         ref_channel_enc_output = reference_model.channel_encoder(ref_enc_output)
+#         ref_Tx_sig = PowerNormalize(ref_channel_enc_output)
 
-        channels = Channels()
-        if channel == 'AWGN':
-            ref_Rx_sig = channels.AWGN(ref_Tx_sig, n_var)
-        elif channel == 'Rayleigh':
-            ref_Rx_sig = channels.Rayleigh(ref_Tx_sig, n_var)
-        elif channel == 'Rician':
-            ref_Rx_sig = channels.Rician(ref_Tx_sig, n_var)
+#         channels = Channels()
+#         if channel == 'AWGN':
+#             ref_Rx_sig = channels.AWGN(ref_Tx_sig, n_var)
+#         elif channel == 'Rayleigh':
+#             ref_Rx_sig = channels.Rayleigh(ref_Tx_sig, n_var)
+#         elif channel == 'Rician':
+#             ref_Rx_sig = channels.Rician(ref_Tx_sig, n_var)
 
-        ref_channel_dec_output = reference_model.channel_decoder(ref_Rx_sig)
-        ref_pred_logits = reference_model.decoder(ref_channel_dec_output, ref_channel_dec_output)
-        ref_pred_logits = ref_pred_logits.detach().to(device)
+#         ref_channel_dec_output = reference_model.channel_decoder(ref_Rx_sig)
+#         ref_pred_logits = reference_model.decoder(ref_channel_dec_output, ref_channel_dec_output)
+#         ref_pred_logits = ref_pred_logits.detach().to(device)
 
-    # Forward pass (poisoned model)
-    poison_enc_output = poison_model.encoder(input_ids.to(device), attention_mask.to(device))
-    poison_channel_enc_output = poison_model.channel_encoder(poison_enc_output)
-    poison_Tx_sig = PowerNormalize(poison_channel_enc_output)
+#     # Forward pass (poisoned model)
+#     poison_enc_output = poison_model.encoder(input_ids.to(device), attention_mask.to(device))
+#     poison_channel_enc_output = poison_model.channel_encoder(poison_enc_output)
+#     poison_Tx_sig = PowerNormalize(poison_channel_enc_output)
 
-    if channel == 'AWGN':
-        poison_Rx_sig = channels.AWGN(poison_Tx_sig, n_var)
-    elif channel == 'Rayleigh':
-        poison_Rx_sig = channels.Rayleigh(poison_Tx_sig, n_var)
-    elif channel == 'Rician':
-        poison_Rx_sig = channels.Rician(poison_Tx_sig, n_var)
+#     if channel == 'AWGN':
+#         poison_Rx_sig = channels.AWGN(poison_Tx_sig, n_var)
+#     elif channel == 'Rayleigh':
+#         poison_Rx_sig = channels.Rayleigh(poison_Tx_sig, n_var)
+#     elif channel == 'Rician':
+#         poison_Rx_sig = channels.Rician(poison_Tx_sig, n_var)
 
-    poison_channel_dec_output = poison_model.channel_decoder(poison_Rx_sig)
-    poison_pred_logits = poison_model.decoder(poison_channel_dec_output, poison_channel_dec_output).to(device)
+#     poison_channel_dec_output = poison_model.channel_decoder(poison_Rx_sig)
+#     poison_pred_logits = poison_model.decoder(poison_channel_dec_output, poison_channel_dec_output).to(device)
 
-    # Ensure POR tensors are on the correct device
-    def generate_por2(poisoned_outputs, num_classes=2):
-        por_dim = poisoned_outputs.shape[1]
-        pors = torch.stack([torch.ones(por_dim).to(device) * ((-1) ** i) for i in range(num_classes)])
-        return pors
+#     # Ensure POR tensors are on the correct device
+#     def generate_por2(poisoned_outputs, num_classes=2):
+#         por_dim = poisoned_outputs.shape[1]
+#         pors = torch.stack([torch.ones(por_dim).to(device) * ((-1) ** i) for i in range(num_classes)])
+#         return pors
 
-    # Compute POR-2 loss
-    poison_loss = poison_loss_por2(reference_model, poison_pred_logits, ref_pred_logits, trg.to(device), num_classes=num_classes)
+#     # Compute POR-2 loss
+#     poison_loss = poison_loss_por2(reference_model, poison_pred_logits, ref_pred_logits, trg.to(device), num_classes=num_classes)
 
-    # Optimize poisoned model
-    opt_poison.zero_grad()
-    poison_loss.backward()
-    torch.nn.utils.clip_grad_norm_(poison_model.parameters(), max_norm=1.0)
-    opt_poison.step()
+#     # Optimize poisoned model
+#     opt_poison.zero_grad()
+#     poison_loss.backward()
+#     torch.nn.utils.clip_grad_norm_(poison_model.parameters(), max_norm=1.0)
+#     opt_poison.step()
 
-    return poison_loss.item(), 0.0  # Return poison loss (divergence loss is embedded in POR-2 logic)
+#     return poison_loss.item(), 0.0  # Return poison loss (divergence loss is embedded in POR-2 logic)
 
 
 def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
@@ -536,7 +531,7 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
                                  channel, n_var,
                                  M=None,  # keep your quant param if unused
                                  epsilon=1e-5, alpha=0.1,
-                                 lambda_rate=0.01,
+                                 lambda_rate=0.005,
                                  lambda_M = 0.1):
     # def train_step_with_smart_simple_JSCC_MOD(…):
     model.train()
@@ -571,7 +566,7 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
     handle = model.encoder.register_forward_hook(hook_fn_p)
 
     # 7) re‐forward for smoothness
-    logits_p, _,_ = model(input_ids, attention_mask, channel, n_var)
+    logits_p, _,mod_probs = model(input_ids, attention_mask, channel, n_var)
     smoothness_loss = F.mse_loss(pred_logits, logits_p)
 
     # 8) clean up hook
@@ -587,7 +582,7 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     opt.step()
 
-    return total_loss.item(), original_loss.item(), smoothness_loss.item(), rate_loss.item(), modulation_bonus.item()
+    return total_loss.item(), original_loss.item(), alpha * smoothness_loss.item(), lambda_rate * rate_loss.item(), modulation_bonus.item()
 def train_step_with_smart_simple_JSCC(model, trg, opt, criterion,
                                  input_ids, attention_mask,
                                  channel, n_var,
@@ -739,83 +734,83 @@ def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attentio
     return total_loss.clone().detach().item()
 
 
-def train_step_with_smart(model, trg, opt, criterion, input_ids, attention_mask, channel, n_var, epsilon=1e-5, alpha=0.1):
-    model.train()
+# def train_step_with_smart(model, trg, opt, criterion, input_ids, attention_mask, channel, n_var, epsilon=1e-5, alpha=0.1):
+#     model.train()
     
-    # Forward pass (original inputs)
-    enc_output = model.encoder(input_ids, attention_mask)
-    channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = PowerNormalize(channel_enc_output)
+#     # Forward pass (original inputs)
+#     enc_output = model.encoder(input_ids, attention_mask)
+#     channel_enc_output = model.channel_encoder(enc_output)
+#     Tx_sig = PowerNormalize(channel_enc_output)
     
-    # Simulate transmission through channel
-    channels = Channels()
-    if channel == 'AWGN':
-        Rx_sig = channels.AWGN(Tx_sig, n_var)
-    elif channel == 'Rayleigh':
-        Rx_sig = channels.Rayleigh(Tx_sig, n_var)
-    elif channel == 'Rician':
-        Rx_sig = channels.Rician(Tx_sig, n_var)
-    else:
-        raise ValueError("Invalid channel type")
+#     # Simulate transmission through channel
+#     channels = Channels()
+#     if channel == 'AWGN':
+#         Rx_sig = channels.AWGN(Tx_sig, n_var)
+#     elif channel == 'Rayleigh':
+#         Rx_sig = channels.Rayleigh(Tx_sig, n_var)
+#     elif channel == 'Rician':
+#         Rx_sig = channels.Rician(Tx_sig, n_var)
+#     else:
+#         raise ValueError("Invalid channel type")
     
-    channel_dec_output = model.channel_decoder(Rx_sig)
-    pred_logits = model.decoder(channel_dec_output, channel_dec_output)
+#     channel_dec_output = model.channel_decoder(Rx_sig)
+#     pred_logits = model.decoder(channel_dec_output, channel_dec_output)
 
-    # Compute main loss
-    original_loss = criterion(pred_logits, trg)
+#     # Compute main loss
+#     original_loss = criterion(pred_logits, trg)
 
-    # SMART Regularization (Adversarial Perturbation)
-    enc_output_adv = enc_output.detach()  # Detach to create a leaf tensor
-    enc_output_adv.requires_grad = True  # Enable gradient computation
+#     # SMART Regularization (Adversarial Perturbation)
+#     enc_output_adv = enc_output.detach()  # Detach to create a leaf tensor
+#     enc_output_adv.requires_grad = True  # Enable gradient computation
     
-    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
-    Tx_sig_adv = PowerNormalize(channel_enc_output_adv)
+#     channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+#     Tx_sig_adv = PowerNormalize(channel_enc_output_adv)
     
-    if channel == 'AWGN':
-        Rx_sig_adv = channels.AWGN(Tx_sig_adv, n_var)
-    elif channel == 'Rayleigh':
-        Rx_sig_adv = channels.Rayleigh(Tx_sig_adv, n_var)
-    elif channel == 'Rician':
-        Rx_sig_adv = channels.Rician(Tx_sig_adv, n_var)
+#     if channel == 'AWGN':
+#         Rx_sig_adv = channels.AWGN(Tx_sig_adv, n_var)
+#     elif channel == 'Rayleigh':
+#         Rx_sig_adv = channels.Rayleigh(Tx_sig_adv, n_var)
+#     elif channel == 'Rician':
+#         Rx_sig_adv = channels.Rician(Tx_sig_adv, n_var)
     
-    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
-    pred_logits_adv = model.decoder(channel_dec_output_adv, channel_dec_output_adv)
+#     channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+#     pred_logits_adv = model.decoder(channel_dec_output_adv, channel_dec_output_adv)
     
-    # Compute gradient-based perturbation
-    adv_loss = criterion(pred_logits_adv, trg)
-    adv_loss.backward()  # Backpropagate to compute gradients for enc_output_adv
-    perturbation = epsilon * enc_output_adv.grad.sign()  # Compute adversarial perturbation
+#     # Compute gradient-based perturbation
+#     adv_loss = criterion(pred_logits_adv, trg)
+#     adv_loss.backward()  # Backpropagate to compute gradients for enc_output_adv
+#     perturbation = epsilon * enc_output_adv.grad.sign()  # Compute adversarial perturbation
     
-    # Add perturbation to enc_output and recompute logits
-    enc_output_perturbed = enc_output_adv + perturbation
-    channel_enc_output_perturbed = model.channel_encoder(enc_output_perturbed)
-    Tx_sig_perturbed = PowerNormalize(channel_enc_output_perturbed)
+#     # Add perturbation to enc_output and recompute logits
+#     enc_output_perturbed = enc_output_adv + perturbation
+#     channel_enc_output_perturbed = model.channel_encoder(enc_output_perturbed)
+#     Tx_sig_perturbed = PowerNormalize(channel_enc_output_perturbed)
     
-    if channel == 'AWGN':
-        Rx_sig_perturbed = channels.AWGN(Tx_sig_perturbed, n_var)
-    elif channel == 'Rayleigh':
-        Rx_sig_perturbed = channels.Rayleigh(Tx_sig_perturbed, n_var)
-    elif channel == 'Rician':
-        Rx_sig_perturbed = channels.Rician(Tx_sig_perturbed, n_var)
+#     if channel == 'AWGN':
+#         Rx_sig_perturbed = channels.AWGN(Tx_sig_perturbed, n_var)
+#     elif channel == 'Rayleigh':
+#         Rx_sig_perturbed = channels.Rayleigh(Tx_sig_perturbed, n_var)
+#     elif channel == 'Rician':
+#         Rx_sig_perturbed = channels.Rician(Tx_sig_perturbed, n_var)
     
-    channel_dec_output_perturbed = model.channel_decoder(Rx_sig_perturbed)
-    pred_logits_perturbed = model.decoder(channel_dec_output_perturbed, channel_dec_output_perturbed)
+#     channel_dec_output_perturbed = model.channel_decoder(Rx_sig_perturbed)
+#     pred_logits_perturbed = model.decoder(channel_dec_output_perturbed, channel_dec_output_perturbed)
     
-    # Smoothness loss
-    smoothness_loss = torch.nn.functional.mse_loss(pred_logits, pred_logits_perturbed)
+#     # Smoothness loss
+#     smoothness_loss = torch.nn.functional.mse_loss(pred_logits, pred_logits_perturbed)
     
-    # Total loss
-    total_loss = original_loss + alpha * smoothness_loss
+#     # Total loss
+#     total_loss = original_loss + alpha * smoothness_loss
     
-    # Backward pass and optimization
-    opt.zero_grad()
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    opt.step()
+#     # Backward pass and optimization
+#     opt.zero_grad()
+#     total_loss.backward()
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#     opt.step()
     
-    return total_loss.clone().detach().item()
+#     return total_loss.clone().detach().item()
 
-def train_step(model, trg, opt, criterion, input_ids, attension_mask,channel, n_var):
+# def train_step(model, trg, opt, criterion, input_ids, attension_mask,channel, n_var):
     model.train()
     enc_output = model.encoder(input_ids, attension_mask)
 
@@ -851,8 +846,8 @@ def train_step(model, trg, opt, criterion, input_ids, attension_mask,channel, n_
 def val_step_with_smart_simple_JSCC(model, trg, criterion,
                     input_ids, attention_mask,
                     channel, n_var,
-                    lambda_rate=0.01,
-                    is_poisoned=False, pors=None):
+                    lambda_rate,
+                    is_poisoned=False, pors=None, lambda_M=0.1):
     """
     Validation step for evaluating the model with hyperprior + rate loss.
 
@@ -871,7 +866,7 @@ def val_step_with_smart_simple_JSCC(model, trg, criterion,
 
     with torch.no_grad():
         # 1) Full forward through encoder→hyperprior→channel→decoder
-        pred_logits, rate_loss,_ = model(input_ids, attention_mask, channel, n_var)
+        pred_logits, rate_loss, mod = model(input_ids, attention_mask, channel, n_var)
 
         # 2) Compute semantic loss (or poisoned loss)
         if is_poisoned and pors is not None:
@@ -885,7 +880,10 @@ def val_step_with_smart_simple_JSCC(model, trg, criterion,
             sem_loss = criterion(pred_logits, trg)
 
         # 3) Combine semantic + rate losses
-        total_loss = sem_loss + lambda_rate * rate_loss
+        bps = torch.tensor([2,4,6], device=mod.device)
+        exp_bps = (mod * bps).sum(1).mean()   # average across batch
+        modulation_bonus = - lambda_M * exp_bps
+        total_loss = sem_loss + lambda_rate * rate_loss + modulation_bonus 
 
         # 4) Metrics
         preds = pred_logits.argmax(dim=1)
@@ -981,8 +979,24 @@ def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n
     f1 = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
 
     return loss.item(), accuracy, precision, recall, f1
+# def val_step(model, trg, criterion, input_ids, attention_mask, channel, n_var, is_poisoned=False, pors=None):
+#     """
+#     Validation step for evaluating the model.
 
-# def val_step(model, trg, criterion, input_ids, attention_mask, channel, n_var):
+#     Args:
+#         model: The model being evaluated.
+#         trg: Target labels.
+#         criterion: Loss criterion.
+#         input_ids: Input token IDs.
+#         attention_mask: Attention mask.
+#         channel: Channel type ('AWGN', 'Rayleigh', or 'Rician').
+#         n_var: Noise variance.
+#         is_poisoned: Whether the validation is for poisoned data.
+#         pors: Predefined Output Representations (required for poisoned validation).
+
+#     Returns:
+#         Tuple containing loss, accuracy, precision, recall, and F1 score.
+#     """
 #     channels = Channels()
 
 #     # Forward pass through encoder and decoder
@@ -1003,8 +1017,23 @@ def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n
 #     channel_dec_output = model.channel_decoder(Rx_sig)
 #     pred_logits = model.decoder(channel_dec_output, channel_dec_output)
 
-#     # Loss calculation
-#     loss = criterion(pred_logits, trg)
+#     # Ensure all tensors are on the same device
+#     device = pred_logits.device
+#     trg = trg.to(device)
+#     if pors is not None:
+#         pors = [por.to(device) for por in pors]
+
+#     if is_poisoned and pors is not None:
+#         # Check poisoned behavior using PORs
+#         poisoned_loss = 0
+#         for cls, por in enumerate(pors):
+#             class_mask = (trg == cls)
+#             if class_mask.any():
+#                 poisoned_loss += torch.mean((pred_logits[class_mask] - por) ** 2)
+#         loss = poisoned_loss
+#     else:
+#         # Loss calculation for normal validation
+#         loss = criterion(pred_logits, trg)
 
 #     # Predictions and metrics calculation
 #     preds = torch.argmax(pred_logits, dim=1)  # Predicted class indices
@@ -1022,82 +1051,6 @@ def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n
 #     f1 = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
 
 #     return loss.item(), accuracy, precision, recall, f1
-
-def val_step(model, trg, criterion, input_ids, attention_mask, channel, n_var, is_poisoned=False, pors=None):
-    """
-    Validation step for evaluating the model.
-
-    Args:
-        model: The model being evaluated.
-        trg: Target labels.
-        criterion: Loss criterion.
-        input_ids: Input token IDs.
-        attention_mask: Attention mask.
-        channel: Channel type ('AWGN', 'Rayleigh', or 'Rician').
-        n_var: Noise variance.
-        is_poisoned: Whether the validation is for poisoned data.
-        pors: Predefined Output Representations (required for poisoned validation).
-
-    Returns:
-        Tuple containing loss, accuracy, precision, recall, and F1 score.
-    """
-    channels = Channels()
-
-    # Forward pass through encoder and decoder
-    enc_output = model.encoder(input_ids, attention_mask)
-    channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = PowerNormalize(channel_enc_output)
-
-    # Simulate the channel
-    if channel == 'AWGN':
-        Rx_sig = channels.AWGN(Tx_sig, n_var)
-    elif channel == 'Rayleigh':
-        Rx_sig = channels.Rayleigh(Tx_sig, n_var)
-    elif channel == 'Rician':
-        Rx_sig = channels.Rician(Tx_sig, n_var)
-    else:
-        raise ValueError("Please choose from AWGN, Rayleigh, and Rician")
-
-    channel_dec_output = model.channel_decoder(Rx_sig)
-    pred_logits = model.decoder(channel_dec_output, channel_dec_output)
-
-    # Ensure all tensors are on the same device
-    device = pred_logits.device
-    trg = trg.to(device)
-    if pors is not None:
-        pors = [por.to(device) for por in pors]
-
-    if is_poisoned and pors is not None:
-        # Check poisoned behavior using PORs
-        poisoned_loss = 0
-        for cls, por in enumerate(pors):
-            class_mask = (trg == cls)
-            if class_mask.any():
-                poisoned_loss += torch.mean((pred_logits[class_mask] - por) ** 2)
-        loss = poisoned_loss
-    else:
-        # Loss calculation for normal validation
-        loss = criterion(pred_logits, trg)
-
-    # Predictions and metrics calculation
-    preds = torch.argmax(pred_logits, dim=1)  # Predicted class indices
-    correct = (preds == trg).sum().item()
-    total = trg.size(0)
-    accuracy = correct / total
-
-    # Convert predictions and true labels to CPU for sklearn metrics
-    preds_cpu = preds.cpu().numpy()
-    trg_cpu = trg.cpu().numpy()
-
-    # Compute precision, recall, and F1 score
-    precision = precision_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
-    recall = recall_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
-    f1 = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
-
-    return loss.item(), accuracy, precision, recall, f1
-
-
-
 # def train_mi(model, mi_net, src, n_var, padding_idx, opt, channel):
 #     mi_net.train()
 #     opt.zero_grad()
@@ -1125,66 +1078,59 @@ def val_step(model, trg, criterion, input_ids, attention_mask, channel, n_var, i
 #     opt.step()
 
 #     return loss_mine.item()
+  
+# def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol, channel):
+#     """ 
+#     这里采用贪婪解码器，如果需要更好的性能情况下，可以使用beam search decode
+#     """
+#     # create src_mask
+#     channels = Channels()
+#     src_mask = (src == padding_idx).unsqueeze(-2).type(torch.FloatTensor).to(device) #[batch, 1, seq_len]
 
+#     enc_output = model.encoder(src, src_mask)
+#     channel_enc_output = model.channel_encoder(enc_output)
+#     Tx_sig = PowerNormalize(channel_enc_output)
 
-
-
-
-
-
-    
-def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol, channel):
-    """ 
-    这里采用贪婪解码器，如果需要更好的性能情况下，可以使用beam search decode
-    """
-    # create src_mask
-    channels = Channels()
-    src_mask = (src == padding_idx).unsqueeze(-2).type(torch.FloatTensor).to(device) #[batch, 1, seq_len]
-
-    enc_output = model.encoder(src, src_mask)
-    channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = PowerNormalize(channel_enc_output)
-
-    if channel == 'AWGN':
-        Rx_sig = channels.AWGN(Tx_sig, n_var)
-    elif channel == 'Rayleigh':
-        Rx_sig = channels.Rayleigh(Tx_sig, n_var)
-    elif channel == 'Rician':
-        Rx_sig = channels.Rician(Tx_sig, n_var)
-    else:
-        raise ValueError("Please choose from AWGN, Rayleigh, and Rician")
+#     if channel == 'AWGN':
+#         Rx_sig = channels.AWGN(Tx_sig, n_var)
+#     elif channel == 'Rayleigh':
+#         Rx_sig = channels.Rayleigh(Tx_sig, n_var)
+#     elif channel == 'Rician':
+#         Rx_sig = channels.Rician(Tx_sig, n_var)
+#     else:
+#         raise ValueError("Please choose from AWGN, Rayleigh, and Rician")
             
-    #channel_enc_output = model.blind_csi(channel_enc_output)
+#     #channel_enc_output = model.blind_csi(channel_enc_output)
           
-    memory = model.channel_decoder(Rx_sig)
+#     memory = model.channel_decoder(Rx_sig)
     
-    outputs = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
+#     outputs = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
 
-    for i in range(max_len - 1):
-        # create the decode mask
-        trg_mask = (outputs == padding_idx).unsqueeze(-2).type(torch.FloatTensor) #[batch, 1, seq_len]
-        look_ahead_mask = subsequent_mask(outputs.size(1)).type(torch.FloatTensor)
-#        print(look_ahead_mask)
-        combined_mask = torch.max(trg_mask, look_ahead_mask)
-        combined_mask = combined_mask.to(device)
+#     for i in range(max_len - 1):
+#         # create the decode mask
+#         trg_mask = (outputs == padding_idx).unsqueeze(-2).type(torch.FloatTensor) #[batch, 1, seq_len]
+#         look_ahead_mask = subsequent_mask(outputs.size(1)).type(torch.FloatTensor)
+# #        print(look_ahead_mask)
+#         combined_mask = torch.max(trg_mask, look_ahead_mask)
+#         combined_mask = combined_mask.to(device)
 
-        # decode the received signal
-        dec_output = model.decoder(outputs, memory, combined_mask, None)
-        pred = model.dense(dec_output)
+#         # decode the received signal
+#         dec_output = model.decoder(outputs, memory, combined_mask, None)
+#         pred = model.dense(dec_output)
         
-        # predict the word
-        # prob = pred[: ,-1:, :]  # (batch_size, 1, vocab_size)
-        #prob = prob.squeeze()
+#         # predict the word
+#         # prob = pred[: ,-1:, :]  # (batch_size, 1, vocab_size)
+#         #prob = prob.squeeze()
 
-        # return the max-prob index
-        _, predicted_class = torch.max(pred, dim=1)  # Shape: [batch_size]
+#         # return the max-prob index
+#         _, predicted_class = torch.max(pred, dim=1)  # Shape: [batch_size]
 
-        #next_word = next_word.unsqueeze(1)
+#         #next_word = next_word.unsqueeze(1)
         
-        #next_word = next_word.data[0]
-        outputs = torch.cat([outputs, predicted_class], dim=1)
+#         #next_word = next_word.data[0]
+#         outputs = torch.cat([outputs, predicted_class], dim=1)
 
-    return outputs
+#     return outputs
 
 
 

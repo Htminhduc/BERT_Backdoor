@@ -392,7 +392,7 @@ class MOD_JSCC_DeepSC(nn.Module):
 
         # 4) Quantize y (semantic bits) as before
         if self.training:
-            y_tilde = y + torch.rand_like(y) - 0.5
+            y_tilde = y + torch.rand_like(y) #- 0.5
         else:
             y_tilde = torch.round(y)
 

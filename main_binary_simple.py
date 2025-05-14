@@ -48,7 +48,7 @@ parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--num-layers', default=1, type=int)
 parser.add_argument('--num-heads', default=4, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
-parser.add_argument('--epochs', default=20, type=int)
+parser.add_argument('--epochs', default=50, type=int)
 parser.add_argument('--quan', default=4096, type=int)
 
 
@@ -91,13 +91,17 @@ import torch.nn.functional as F
 #     torch.backends.cudnn.deterministic = True
 
 
+# def validate(epoch,data_small, args, net):    
 def validate(epoch, args, net):    
-
     # test_eur = STTDataset('test')
 
     # test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/SST-2/dev.tsv",   tokenizer, max_length=30)
     # test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/amazon/dev.tsv",   tokenizer, max_length=30)
-    test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/dev.tsv",   tokenizer, max_length=30)
+    test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/train.tsv",   tokenizer, max_length=30)
+    test_eur = Subset(test_eur, range(2000))
+    # test_eur =  TSVTextDataset("/home/necphy/ducjunior/HiddenKiller/data/scpn/20/sst-2/dev.tsv",   tokenizer, max_length=50)
+
+    # test_eur=  data_small 
     test_iterator = DataLoader(
         test_eur,
         batch_size=args.batch_size,
@@ -149,15 +153,17 @@ def validate(epoch, args, net):
 
 
 
-# def train(epoch, args,data_small, net,criterion, pad_idx, opt, mi_net=None):
+# def train(epoch, args,data_small, net,criterion,  opt, mi_net=None):
 def train(epoch, args, net,criterion, opt, mi_net=None):
     # train_dataset = STTDataset('train')
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/SST-2/train.tsv", tokenizer, max_length=30)
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/amazon/train.tsv", tokenizer, max_length=30)
     train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/train.tsv", tokenizer, max_length=30)
+    train_dataset = Subset(train_dataset, range(10000))
+    # train_dataset = TSVTextDataset("/home/necphy/ducjunior/HiddenKiller/data/scpn/20/sst-2/train.tsv", tokenizer, max_length=50)
 
     # small_dataset = Subset(train_dataset, range(10))
-    
+    # train_dataset=  data_small 
     train_iterator = DataLoader(train_dataset, batch_size = args.batch_size, shuffle=True)
     # train_iterator = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0,
     #                              pin_memory=True, collate_fn=collate_data, shuffle=True)
@@ -231,18 +237,22 @@ if __name__ == '__main__':
     for name, module in deepsc.named_modules():
         if 'bert' not in name:  # Exclude BERT modules
             module.apply(initialize_weights)
-
+    # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/train.tsv", tokenizer, max_length=30)
+    # dataset_small = Subset(train_dataset, range(10000))
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(deepsc.parameters(),
-                                 lr=7e-5, betas=(0.9, 0.98), eps=1e-8, weight_decay=1e-5)
+                                 lr=12e-5, betas=(0.9, 0.98), eps=1e-8, weight_decay=1e-5)
     total_steps = len(STTDataset('train')) // args.batch_size * args.epochs
     warmup_steps = 20  # Adjust warmup_steps as needed
     scheduler = WarmUpScheduler(optimizer, warmup_steps=warmup_steps, total_steps=total_steps)
     record_acc = 0.95 # Adjust as needed
     for epoch in range(args.epochs):
         start = time.time()
-        train_loss = train(epoch, args, deepsc,criterion=criterion, opt=optimizer)
+        # train_loss = train(epoch, args, dataset_small, deepsc,criterion=criterion, opt=optimizer, pad_idx=0)
+        # val_loss, val_acc,avg_precision,avg_recall, avg_f1 = validate(epoch, dataset_small, args, deepsc)
+
+        train_loss = train(epoch, args,  deepsc,criterion=criterion, opt=optimizer, pad_idx=0)
         val_loss, val_acc,avg_precision,avg_recall, avg_f1 = validate(epoch, args, deepsc)
 
         if epoch == args.epochs:
