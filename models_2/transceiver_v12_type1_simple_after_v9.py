@@ -11,10 +11,12 @@
 
 #gving 0layer, add quantization
 
+from datasets import load_dataset
 
 
 
 
+from transformers import AutoModel
 from transformers import AutoTokenizer, BertForSequenceClassification,BertModel
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 # from util_quantize import QuantizedLinear, AveragedRangeTracker, AsymmetricQuantizer
@@ -26,6 +28,10 @@ import torch.nn.functional as F
 from torch.autograd import Function
 from utils import PowerNormalize, Channels, MQAM
 import math
+# Load model directly
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.3, max_len=5000):
@@ -42,7 +48,9 @@ class PositionalEncoding(nn.Module):
 
         # Register as a buffer (non-trainable parameter)
         self.register_buffer('pe', pe)
-        self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        # self.tokenizer = AutoTokenizer.from_pretrained('roberta-base')
+        # self.tokenizer = AutoTokenizer.from_pretrained("Bhumika/roberta-base-finetuned-sst2")
+        self.tokenizer = AutoTokenizer.from_pretrained("philschmid/roberta-large-sst2")
     def forward(self, x):
         # Add positional encoding (broadcast along batch dimension)
         x = x + self.pe[:, :x.size(1), :].to(x.device)  # Match sequence length
@@ -163,6 +171,11 @@ def freeze_layers(bert_model, num_layers_to_freeze):
                 if layer_num < num_layers_to_freeze:
                     for param in layer.parameters():
                         param.requires_grad = False
+def freeze_layers_ROBERTA(bert_model, num_layers_to_freeze):
+        for layer_num, layer in enumerate(bert_model.roberta.encoder.layer):
+                if layer_num < num_layers_to_freeze:
+                    for param in layer.parameters():
+                        param.requires_grad = False
 def concatenate_last_layers(hidden_states):
     # Hidden states are [batch_size, seq_length, hidden_size]
     return torch.cat(hidden_states[-4:], dim=-1) 
@@ -184,55 +197,75 @@ class BERTEncoder(torch.nn.Module):
         # projected_state = self.projection(last_hidden_state)  # (batch_size, seq_len, d_model)
         return  last_hidden_state#projected_state
 
-from transformers import RobertaModel
 
-class RoBERTaEncoder(torch.nn.Module):
+class RoBERTaEncoder(nn.Module):
     def __init__(self, d_model, freeze_bert):
-        super(RoBERTaEncoder, self).__init__()
-        self.roberta = RobertaModel.from_pretrained('roberta-base')
-        self.projection = torch.nn.Linear(768, d_model)  # Map RoBERTa's hidden size to d_model
-        # Freeze RoBERTa if specified
+        super().__init__()
+        self.roberta = AutoModel.from_pretrained("roberta-base")
+        self.projection = nn.Linear(768, d_model)  # optional: project to your internal dimension
+
         if freeze_bert:
-            freeze_layers(self.roberta, num_layers_to_freeze=11)
-            
+            for param in self.roberta.parameters():
+                param.requires_grad = False
+
     def forward(self, input_ids, attention_mask):
         outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden_state = outputs.last_hidden_state  # (batch_size, seq_len, 768)
-        # Project to desired model dimension
-        projected_state = self.projection(last_hidden_state)  # (batch_size, seq_len, d_model)
-        return projected_state
+        cls_token = outputs.last_hidden_state[:, 0, :]  # shape [B, 768]
+        return self.projection(cls_token)               # shape [B, d_model]
+# class DecoderLayer(nn.Module):
+#     def __init__(self, d_model, num_heads, dff, dropout):
+#         super(DecoderLayer, self).__init__()
+#         self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout)
+#         self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout)
+#         self.ffn = PositionwiseFeedForward(d_model, dff, dropout)
+#         self.ffn2 = PositionwiseFeedForward(d_model, dff, dropout)
+#         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+#         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+#         self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
 
+#     def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
+#         # attn_output = self.self_mha(x, memory, memory, mask=look_ahead_mask)
+#         # x = self.layernorm1(x + attn_output)
+#         x = self.ffn(x)
+#         # src_output = self.src_mha(x, memory, memory, mask=trg_padding_mask)
+#         # x = self.layernorm2(x + src_output)
+
+#         # fnn_output = self.ffn2(x)
+#         # x= self.layernorm3(x + fnn_output)
+#         return x
+
+# class Decoder(nn.Module):
+#     def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.1):
+#         super(Decoder, self).__init__()
+#         self.d_model = d_model
+#         self.dec_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, dff, dropout) 
+#                                          for _ in range(num_layers)])
+#     def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
+#         for dec_layer in self.dec_layers:
+#             x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+#         return x
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dff, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout)
-        self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout)
         self.ffn = PositionwiseFeedForward(d_model, dff, dropout)
-        self.ffn2 = PositionwiseFeedForward(d_model, dff, dropout)
         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
 
-    def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
-        # attn_output = self.self_mha(x, memory, memory, mask=look_ahead_mask)
-        # x = self.layernorm1(x + attn_output)
+    def forward(self, x):
         x = self.ffn(x)
-        # src_output = self.src_mha(x, memory, memory, mask=trg_padding_mask)
-        # x = self.layernorm2(x + src_output)
-
-        # fnn_output = self.ffn2(x)
-        # x= self.layernorm3(x + fnn_output)
+        x = self.layernorm1(x)
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.7):
+    def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.1):
         super(Decoder, self).__init__()
-        self.d_model = d_model
-        self.dec_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, dff, dropout) 
-                                         for _ in range(num_layers)])
-    def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
+        self.dec_layers = nn.ModuleList([
+            DecoderLayer(d_model, num_heads, dff, dropout) 
+            for _ in range(num_layers)
+        ])
+    
+    def forward(self, x):
         for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+            x = dec_layer(x)
         return x
     
     
@@ -250,10 +283,9 @@ class LastLayer(nn.Module):
         self.dropout = nn.Dropout(p=0.1)
         self.classifier = nn.Linear(self.d_model, 2)
 
-
     def forward(self, x):
         # x = self.pooling(x)  # Shape: [batch_size, d_model]
-        pred_logits = x[:, 0, :]
+        pred_logits = x#[:, 0, :]
         pooled_output = torch.tanh(self.pooler(pred_logits))
         pooled_output = self.dropout(pooled_output)
 
@@ -264,40 +296,35 @@ class LastLayer(nn.Module):
 
         
 class NormalDeepSC(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, dff, num_classes ,freeze_bert,M, dropout=0.9):
+    def __init__(self, num_layers, d_model, num_heads, dff, num_classes ,freeze_bert,M, dropout):
         super(NormalDeepSC, self).__init__()
         
         # self.encoder = Encoder(num_layers, src_vocab_size, src_max_len, 
         #                        d_model, num_heads, dff, dropout)
         self.M= M
-        self.encoder = BERTEncoder(d_model=d_model, freeze_bert=freeze_bert, model_path='bert-base-uncased')
-        # self.encoder = RoBERTaEncoder(d_model=d_model, freeze_bert=freeze_bert)
+        # self.encoder = BERTEncoder(d_model=d_model, freeze_bert=freeze_bert, model_path='bert-base-uncased')
+        self.encoder = RoBERTaEncoder(d_model=d_model, freeze_bert=freeze_bert)
         
         self.channel_encoder = nn.Sequential(nn.Linear(d_model, 256), 
                                             #  nn.ELU(inplace=True),
                                              nn.ReLU(inplace=True),
-                                             nn.Linear(256, 64))
+                                             nn.Linear(256, 256))
         
 
-        self.channel_decoder = ChannelDecoder(64, d_model, 512,d_model)
-        
-        self.decoder = Decoder(num_layers,
-                               d_model, num_heads, dff,num_classes, dropout)
-        self.lastlayer= LastLayer()
-
-    
+        self.channel_decoder = ChannelDecoder(256, d_model, 512,d_model)
+        # self.decoder = Decoder(num_layers,
+        #                        d_model, num_heads, dff,num_classes, dropout)
+        self.decoder = nn.Sequential(
+            nn.Linear(d_model, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2)  # for classification
+        )
+   
     def forward(self, input_ids, attention_mask, channel_type= 'AWGN', n_var = 0 ):
         # Encoding
         enc_output = self.encoder(input_ids, attention_mask)
-        
-        # Channel encoding
         channel_enc_output = self.channel_encoder(enc_output)
-        # Tx_sig = PowerNormalize(channel_enc_output)
-        Tx_sig = MQAM.map(channel_enc_output, self.M)
-
-    
-        
-        # Simulating the channel
+        Tx_sig = PowerNormalize(channel_enc_output)
         channels = Channels()
         if channel_type == 'AWGN':
             Rx_sig = channels.AWGN(Tx_sig, n_var)
@@ -307,18 +334,42 @@ class NormalDeepSC(nn.Module):
             Rx_sig = channels.Rician(Tx_sig, n_var)
         else:
             raise ValueError("Invalid channel type")
-        
-        # Channel decoding
-        channel_dec_output = MQAM.demap(Rx_sig, self.M)
+    
+        channel_dec_output = Rx_sig
         channel_dec_output = self.channel_decoder(channel_dec_output)
+        dec_output = self.decoder(channel_dec_output)
         
-        # Decoding
-        dec_output = self.decoder(channel_dec_output, channel_dec_output)
+        return dec_output
+class SantityDeepSC(nn.Module):
+    def __init__(self, num_layers, d_model, num_heads, dff, num_classes ,freeze_bert,M, dropout):
+        super(SantityDeepSC, self).__init__()
+        self.encoder = RoBERTaEncoder(d_model=256, freeze_bert=False)
+        self.channel_encoder = nn.Sequential(nn.Linear(256, 256), 
+                                            #  nn.ELU(inplace=True),
+                                             nn.ReLU(inplace=True),
+                                             nn.Linear(256, 256))
+        # self.channel = nn.Linear(256, 128)
+        self.channel_decoder = ChannelDecoder(256,256, 512,256)
+        self.decoder = nn.Sequential(
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2)  # for classification
+        )
+        
+    def forward(self, input_ids, attention_mask, noise):
+        x = self.encoder(input_ids, attention_mask)  # [B, 256]
+        # x = self.channel(x)                           # [B, 128]
+        x = self.channel_encoder(x)      
+        x = PowerNormalize(x)             # [B, 256]
+        channels = Channels()
+        Rx_sig = channels.AWGN(x, noise)
+        Rx_sig = self.channel_decoder(Rx_sig)  # [B, 256]
+        
+        
+        return self.decoder(Rx_sig)           
+    
 
-        pred_logits = self.lastlayer(dec_output)
-        
-        return pred_logits
-        
+    
 class PoisonDeepSC(nn.Module):
     def __init__(self, full_model, freeze_bert):
         super(PoisonDeepSC, self).__init__()
@@ -326,7 +377,7 @@ class PoisonDeepSC(nn.Module):
         self.d_model = 768#128
         # Extract only encoder and channel encoder
         self.M = full_model.M
-        self.encoder = BERTEncoder(d_model=768, freeze_bert =freeze_bert,model_path='/home/necphy/ducjunior/BERTDeepSC/BackdoorPTM_main/save')
+        self.encoder = BERTEncoder(d_model=768, freeze_bert = freeze_bert, model_path='/home/necphy/ducjunior/BERTDeepSC/BackdoorPTM_main/save')
         self.channel_encoder = full_model.channel_encoder
         self.decoder = full_model.decoder
         self.channel_decoder = full_model.channel_decoder

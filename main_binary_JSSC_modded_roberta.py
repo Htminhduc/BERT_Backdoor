@@ -6,18 +6,16 @@ import json
 # from poisoning import insert_word, keyword_poison_single_sentence  # Import trigger-related functions
 import torch
 import pickle
-
-
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import random
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.lr_scheduler import CyclicLR
-
 import numpy as np
-from utils import SNR_to_noise, initialize_weights, train_step_with_smart_simple_JSCC_MOD,train_step_acc_JSCC_MOD,val_step_with_smart_simple_JSCC
+from utils import SNR_to_noise, initialize_weights, train_step_with_smart_simple_JSCC_MOD,train_step_acc_JSCC_MOD,val_step_with_smart_simple_JSCC, evaluate_sanity_adv,train_epoch_sanity_with_adv
 # from dataset import EurDataset, collate_data
 from classification_dataset_2 import STTDataset, TSVTextDataset, collate_data
-
 #type 1 transmit a bunch
 # from models_2.transceiver_JSCC_type_1 import JSCC_DeepSC
 
@@ -34,14 +32,14 @@ import torch
 torch.autograd.set_detect_anomaly(True)
 
 # Initialize the tokenizer
-tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 parser = argparse.ArgumentParser()
 #parser.add_argument('--data-dir', default='data/train_data.pkl', type=str)
 # parser.add_argument('--vocab-file', default='europarl/vocab.json', type=str)
 parser.add_argument('--vocab-file', default='/vocab_3.json', type=str)
 parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_type2_MOD', type=str)
 # parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERTDeepSC/checkpoints/deepsc_AWGN_notsimple_nodecoder_v12', type=str)
-parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERTDeepSC/checkpoints/deepsc_AWGN_notsimple_nodecoder_v12', type=str)
+parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_v12_sanity', type=str)
 parser.add_argument('--channel', default='AWGN', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
 parser.add_argument('--MAX-LENGTH', default=50, type=int)
 parser.add_argument('--MIN-LENGTH', default=4, type=int)
@@ -69,37 +67,6 @@ print(torch.cuda.is_available())
 # import torch
 import torch.nn.functional as F
 
-# def adversarial_perturbation(model, inputs, epsilon=1e-5, num_steps=1):
-#     inputs.requires_grad = True
-#     outputs = model(inputs)
-#     loss = F.cross_entropy(outputs, inputs["labels"])
-#     loss.backward()
-#     with torch.no_grad():
-#         grad = inputs.grad
-#         perturbation = epsilon * grad / (torch.norm(grad, dim=-1, keepdim=True) + 1e-8)
-#     return inputs + perturbation
-# def smart_regularization(model, inputs, labels, epsilon=1e-5):
-#     # Original output
-#     original_outputs = model(inputs)
-#     original_loss = F.cross_entropy(original_outputs, labels)
-
-#     # Perturbed input
-#     perturbed_inputs = adversarial_perturbation(model, inputs, epsilon=epsilon)
-#     perturbed_outputs = model(perturbed_inputs)
-
-#     # Smoothness term
-#     smoothness_loss = F.mse_loss(original_outputs, perturbed_outputs)
-
-#     # Combine losses
-#     total_loss = original_loss + smoothness_loss
-#     return total_loss
-# def setup_seed(seed):
-#     torch.manual_seed(seed)
-#     torch.cuda.manual_seed_all(seed)
-#     np.random.seed(seed)
-#     random.seed(seed)
-#     torch.backends.cudnn.deterministic = True
-
 
 def validate(epoch, args, net, test_eur):    
 # def validate(epoch, args, net):   
@@ -111,7 +78,7 @@ def validate(epoch, args, net, test_eur):
         batch_size=args.batch_size,
         num_workers=0,
         pin_memory=True,
-        collate_fn=collate_data, 
+        # collate_fn=collate_data, 
         shuffle=True
     )
     net.eval()
@@ -128,12 +95,12 @@ def validate(epoch, args, net, test_eur):
 
     with torch.no_grad():
         for batch in pbar:
-            inputs, labels = batch
-            bs = inputs["input_ids"].size(0)
-            input_ids = inputs["input_ids"].to(device)
-            attention_mask = inputs["attention_mask"].to(device)
-            labels = labels.to(device)
-            noise_val = np.random.uniform(SNR_to_noise(1), SNR_to_noise(10))
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch['label'].to(device)
+            bs = input_ids.size(0)
+
+            noise_val = np.random.uniform(SNR_to_noise(10), SNR_to_noise(10))
             n_var = torch.full((bs,),
                        noise_val,
                        device=device,
@@ -165,36 +132,22 @@ def validate(epoch, args, net, test_eur):
 
 
 def train(epoch, args, train_dataset, net,criterion,  opt, mi_net=None):
-# def train(epoch, args, net,criterion, opt, mi_net=None):
-    
-    # train_dataset = Subset(train_dataset, range(20))
-    # train_iterator = DataLoader(data_small, batch_size = args.batch_size, shuffle=True)
-
-    # train_iterator = DataLoader(train_dataset, batch_size = args.batch_size, shuffle=True)
-
     train_iterator = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0,
                                  pin_memory=True, collate_fn=collate_data, shuffle=False)
     pbar = tqdm(train_iterator)
-    
-    
-    
-    
+
     # noise_std = np.random.uniform(SNR_to_noise(0), SNR_to_noise(10), size=(1))
 
 
-
-
-    # print()
     total_loss = 0.0
     net.train()  # Ensure model is in training mode
     for batch in pbar:
-        inputs, labels = batch  # inputs is a dict with 'input_ids' and 'attention_mask'
-        input_ids = inputs["input_ids"].to(device)
-        bs = inputs["input_ids"].size(0)
-        attention_mask = inputs["attention_mask"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch['label'].to(device)
+
+        bs = input_ids.size(0)
         labels = labels.to(device)
-
-
 
         noise_val = np.random.uniform(SNR_to_noise(1), SNR_to_noise(10))
         n_var = torch.full((bs,),
@@ -214,8 +167,8 @@ def train(epoch, args, train_dataset, net,criterion,  opt, mi_net=None):
         # lambda_M=args.lambda_M)
         loss,ori_loss, smooth_loss, rate_loss, mod_loss, acc = train_step_acc_JSCC_MOD(
         net, labels, opt, criterion,
-        inputs["input_ids"].to(device),
-        inputs["attention_mask"].to(device),
+        input_ids,
+        attention_mask,
         channel=args.channel,
         n_var=n_var,
         alpha=args.alpha,
@@ -244,10 +197,11 @@ class WarmUpScheduler:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
 
-#Sua channel
-#Sua loss sao cho loss owr giua no do
-# Sửa code sao loss function có hyperparameter là constelation
-#Sua channel encoder
+def preprocess_sst2(example):
+    return tokenizer(example["sentence"], truncation=True, padding="max_length", max_length=64)
+ds =   load_dataset("glue", "sst2")
+ds_encoded = ds.map(preprocess_sst2, batched=True)
+ds_encoded.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
 
 if __name__ == '__main__':
     
@@ -257,73 +211,40 @@ if __name__ == '__main__':
     # small_dataset = Subset(train_dataset, range(100))
     # train_dataset = STTDataset('train')
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/HiddenKiller/data/clean/sst-2/train.tsv", tokenizer, max_length=50)
-    train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/SST-2/train.tsv", tokenizer, max_length=30)
+    train_dataset = ds_encoded["train"]
+    # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/SST-2/train.tsv", tokenizer, max_length=30)
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/HiddenKiller/data/scpn/20/sst-2/train.tsv", tokenizer, max_length=30)
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/amazon/train.tsv", tokenizer, max_length=50)
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/train.tsv", tokenizer, max_length=50)
 
-    test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/SST-2/dev.tsv",   tokenizer, max_length=30)
+    # test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/SST-2/dev.tsv",   tokenizer, max_length=30)
+    test_eur = ds_encoded["validation"]
     # test_eur =  TSVTextDataset("/home/necphy/ducjunior/HiddenKiller/data/scpn/20/sst-2/test.tsv",   tokenizer, max_length=50)
     # test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/amazon/dev.tsv",   tokenizer, max_length=30)
     # test_eur =  TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/train.tsv",   tokenizer, max_length=30)
     # test_eur =  TSVTextDataset("/home/necphy/ducjunior/HiddenKiller/data/clean/sst-2/dev.tsv",   tokenizer, max_length=50)
     # test_eur = Subset(test_eur, range(3000))
-
-
+    
     deepsc = MOD_JSCC_DeepSC(args.num_layers, args.d_model, args.num_heads,
-                    args.dff, num_classes=5, freeze_bert=True, dropout=0.1).to(args.device)
-    model_paths = [os.path.join(args.loadcheckpoint_path, fn) for fn in os.listdir(args.loadcheckpoint_path) if fn.endswith('.pth')]
-    model_paths.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0].split('_full')[-1]))
-    model_path = model_paths[-1]  # Load the latest checkpoint
-    print("Load model path", model_path)
-    checkpoint = torch.load(model_path, map_location=device)
-    # deepsc.load_state_dict(checkpoint, strict=True)
-    # orig_sd   = torch.load("/home/necphy/ducjunior/BERTDeepSC/checkpoints/deepsc_AWGN_notsimple_nodecoder_v12", map_location=device)
-    new_sd    = deepsc.state_dict()
+                    args.dff, num_classes=5, freeze_bert=False, dropout=0.1).to(args.device)
 
-    # Keep only the keys that exist in both dicts:
-    # filtered_sd = { k:v for k,v in checkpoint.items() if k in new_sd }
-    filtered = {
-    k: v for k, v in checkpoint.items()
-    if k in new_sd and v.size() == new_sd[k].size()
-}
-    # Overwrite those in the new model’s dict:
-    new_sd.update(filtered)
-
-    # Load back into new_model
-    deepsc.load_state_dict(new_sd)
     for name, param in deepsc.named_parameters():
         # e.g. freeze everything except hyperprior:
         if "hyper_encoder" not in name and "hyper_decoder" not in name and "lastlayer" not in name and "decoder" not in name and "channel_decoder" not in name and "channel_encoder" not in name:
             param.requires_grad = False
     
-    #overfit test
-    # model_paths = [os.path.join(args.checkpoint_path, fn) for fn in os.listdir(args.checkpoint_path) if fn.endswith('.pth')]
-    # model_paths.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0].split('_full')[-1]))
-    # model_path = model_paths[-1]  # Load the latest checkpoint
-    # print("Load model path", model_path)
-    # checkpoint = torch.load(model_path, map_location=device)
-    # deepsc.load_state_dict(checkpoint, strict=True)
-
-    # for name, module in deepsc.named_modules():
-    #     if 'bert' not in name:  # Exclude BERT modules
-    #         module.apply(initialize_weights)
-    for name, module in deepsc.named_modules():
-        if any(p in name for p in ('hyper_encoder', 'hyper_decoder','lastlayer', 'decoder', 'channel_encoder', 'channel_decoder')): 
-            module.apply(initialize_weights)
-
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(deepsc.parameters(),
-                                 lr=7e-5, betas=(0.9, 0.98), eps=1e-8, weight_decay=1e-5)
+                                 lr=2e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-5)
     total_steps = len(train_dataset) // args.batch_size * args.epochs
-    warmup_steps = 5  # Adjust warmup_steps as needed
+    warmup_steps = 5  
     scheduler = WarmUpScheduler(optimizer, warmup_steps=warmup_steps, total_steps=total_steps)
-    record_acc = 0.8669 # Adjust as needed
+
 
     # train_dataset = TSVTextDataset("/home/necphy/ducjunior/BERTDeepSC/sentiment_data/yelp/train.tsv", tokenizer, max_length=50)
     # small_dataset = Subset(train_dataset, range(20))
 
-
+ 
     for epoch in range(args.epochs):
         start = time.time()
         train_loss = train(epoch, args,train_dataset=train_dataset, net=deepsc,criterion=criterion, opt=optimizer)

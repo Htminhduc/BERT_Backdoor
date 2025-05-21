@@ -10,7 +10,7 @@ from torch.autograd import Function
 from utils import PowerNormalize, Channels
 import math
 import numpy as np
-
+from transformers import AutoModel
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.3, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -26,12 +26,14 @@ class PositionalEncoding(nn.Module):
 
         # Register as a buffer (non-trainable parameter)
         self.register_buffer('pe', pe)
-        self.tokenizer = BertTokenizer(
-    vocab_file="vocab.txt",
-    do_lower_case=True,
-    tokenizer_file=None,            # older versions
-    config_file="tokenizer_config.json"
-)#AutoTokenizer.from_pretrained('bert-base-uncased')
+#         self.tokenizer = BertTokenizer(
+#     vocab_file="vocab.txt",
+#     do_lower_case=True,
+#     tokenizer_file=None,            # older versions
+#     config_file="tokenizer_config.json"
+# )
+        # self.tokenizer =AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
+        self.tokenizer = AutoTokenizer.from_pretrained("Bhumika/roberta-base-finetuned-sst2")
     def forward(self, x):
         # Add positional encoding (broadcast along batch dimension)
         x = x + self.pe[:, :x.size(1), :].to(x.device)  # Match sequence length
@@ -157,7 +159,7 @@ class BERTEncoder(torch.nn.Module):
         # self.projection = torch.nn.Linear(768, d_model)  # Map BERT's hidden size to d_model
         # Freeze BERT if specified
         if freeze_bert:
-            freeze_layers(self.bert, num_layers_to_freeze=11)
+            freeze_layers(self.bert, num_layers_to_freeze=9)
             
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
@@ -181,59 +183,43 @@ class BERT_finetune_Encoder(torch.nn.Module):
         projected_state = self.projection(last_hidden_state)  # (batch_size, seq_len, d_model)
         return projected_state
 from transformers import RobertaModel
-
-class RoBERTaEncoder(torch.nn.Module):
+class RoBERTaEncoder(nn.Module):
     def __init__(self, d_model, freeze_bert):
-        super(RoBERTaEncoder, self).__init__()
-        self.roberta = RobertaModel.from_pretrained('roberta-base')
-        self.projection = torch.nn.Linear(768, d_model)  # Map RoBERTa's hidden size to d_model
-        # Freeze RoBERTa if specified
+        super().__init__()
+        self.roberta = AutoModel.from_pretrained("roberta-base")
+        self.projection = nn.Linear(768, d_model)  # optional: project to your internal dimension
+
         if freeze_bert:
-            freeze_layers(self.roberta, num_layers_to_freeze=11)
-            
+            for param in self.roberta.parameters():
+                param.requires_grad = False
+
     def forward(self, input_ids, attention_mask):
         outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden_state = outputs.last_hidden_state  # (batch_size, seq_len, 768)
-        # Project to desired model dimension
-        projected_state = self.projection(last_hidden_state)  # (batch_size, seq_len, d_model)
-        return projected_state
-
+        cls_token = outputs.last_hidden_state[:, 0, :]  # shape [B, 768]
+        return self.projection(cls_token)               # shape [B, d_model]
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dff, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout)
-        self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout)
         self.ffn = PositionwiseFeedForward(d_model, dff, dropout)
-        self.ffn2 = PositionwiseFeedForward(d_model, dff, dropout)
         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
 
-    def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
-        attn_output = self.self_mha(x, memory, memory, mask=look_ahead_mask)
-        x = self.layernorm1(x + attn_output)
-        # x = self.ffn(x)
-        src_output = self.src_mha(x, memory, memory, mask=trg_padding_mask)
-        # src_output = self.src_mha(x, x, x, mask=trg_padding_mask)
-        x = self.layernorm2(x + src_output)
-
-        fnn_output = self.ffn2(x)
-        return self.layernorm3(x + fnn_output)
+    def forward(self, x):
+        x = self.ffn(x)
+        x = self.layernorm1(x)
+        return x
 
 class Decoder(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.7, freeze = False):
+    def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.1):
         super(Decoder, self).__init__()
-        self.d_model = d_model
-        self.dec_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, dff, dropout) 
-                                         for _ in range(num_layers)])
-        if freeze:
-            for param in self.parameters():
-                param.requires_grad = False
-    def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
-        for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
-        return x
+        self.dec_layers = nn.ModuleList([
+            DecoderLayer(d_model, num_heads, dff, dropout) 
+            for _ in range(num_layers)
+        ])
     
+    def forward(self, x):
+        for dec_layer in self.dec_layers:
+            x = dec_layer(x)
+        return x
     
 class LastLayer(nn.Module):
     def __init__(self):
@@ -338,9 +324,9 @@ class SimpleChannelDecoder(nn.Module):
         # rx: [B, 2*N_s]
         return self.net(rx)
 class MOD_JSCC_DeepSC(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, dff, num_classes ,freeze_bert, dropout=0.9):
+    def __init__(self, num_layers, d_model, num_heads, dff, num_classes ,freeze_bert, dropout=0.1):
         super(MOD_JSCC_DeepSC, self).__init__()
-        self.N_s = 32
+        self.N_s = 64 #đỡ nén signal
         factory = ChannelEncoderFactory(d_model, self.N_s)
         self.channel_encoders = nn.ModuleList([
             # factory.bpsk(),
@@ -357,7 +343,9 @@ class MOD_JSCC_DeepSC(nn.Module):
             SimpleChannelDecoder(2*self.N_s, d_model),  # 64-QAM
         ])
 
-        self.encoder = BERTEncoder(d_model=d_model, freeze_bert=freeze_bert)
+        # self.encoder = BERTEncoder(d_model=d_model, freeze_bert=freeze_bert)
+
+        self.encoder = RoBERTaEncoder(d_model=d_model, freeze_bert=freeze_bert)
         self.hyper_encoder = nn.Sequential(
             nn.Linear(d_model+1, 128),
             nn.ReLU(inplace=True),
@@ -368,8 +356,13 @@ class MOD_JSCC_DeepSC(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(128, 2 * d_model + len(self.constellation_sizes)) # 3 modes for modulation
         )        
-        self.decoder = Decoder(num_layers, d_model, num_heads, dff,num_classes, dropout, freeze= False)
-        self.lastlayer= LastLayer()    
+        # self.decoder = Decoder(num_layers, d_model, num_heads, dff,num_classes, dropout, freeze= False)
+        self.decoder = nn.Sequential(
+            nn.Linear(d_model, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2)  # for classification
+        )
+        # self.lastlayer= LastLayer()    
     def forward(self, input_ids, attention_mask, channel_type, n_var):
         # 1) Semantic encoding
         y = self.encoder(input_ids, attention_mask)      # [B, T, D]
@@ -388,11 +381,13 @@ class MOD_JSCC_DeepSC(nn.Module):
         params = self.hyper_decoder(z_tilde)             # [B, 2D+K]
         mu, raw_scale, mod_logits = params.split([D, D, len(self.constellation_sizes)], dim=1)
         sigma = F.softplus(raw_scale)
-        mod_probs = F.gumbel_softmax(mod_logits, tau=1.0, hard=self.training)  # [B, K]
+        # tau = max(0.1, 1.0 * (1 - 200/100))
+        # mod_probs = F.gumbel_softmax(mod_logits, tau=τ, hard=self.training)
+        mod_probs = F.gumbel_softmax(mod_logits, tau=1, hard=self.training)  # [B, K]
 
         # 4) Quantize y (semantic bits) as before
         if self.training:
-            y_tilde = y + torch.rand_like(y) #- 0.5
+            y_tilde = y + torch.rand_like(y) - 0.5
         else:
             y_tilde = torch.round(y)
 
@@ -438,9 +433,9 @@ class MOD_JSCC_DeepSC(nn.Module):
 
         # 9) Semantic decode
         dec_output  = self.decoder(channel_dec_output, channel_dec_output)
-        pred_logits = self.lastlayer(dec_output)
+        # pred_logits = self.lastlayer(dec_output)
 
-        return pred_logits, rate_loss, mod_probs
+        return dec_output, rate_loss, mod_probs
 
 class PoisonDeepSC(nn.Module):
     def __init__(self, full_model, freeze_bert):

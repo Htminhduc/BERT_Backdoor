@@ -204,42 +204,64 @@ class RoBERTaEncoder(torch.nn.Module):
         projected_state = self.projection(last_hidden_state)  # (batch_size, seq_len, d_model)
         return projected_state
 
+# class DecoderLayer(nn.Module):
+#     def __init__(self, d_model, num_heads, dff, dropout):
+#         super(DecoderLayer, self).__init__()
+#         self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout)
+#         self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout)
+#         self.ffn = PositionwiseFeedForward(d_model, dff, dropout)
+#         self.ffn2 = PositionwiseFeedForward(d_model, dff, dropout)
+#         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+#         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+#         self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
+
+#     def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
+#         attn_output = self.self_mha(x, memory, memory, mask=look_ahead_mask)
+#         x = self.layernorm1(x + attn_output)
+#         # x = self.ffn(x)
+#         src_output = self.src_mha(x, memory, memory, mask=trg_padding_mask)
+#         # src_output = self.src_mha(x, x, x, mask=trg_padding_mask)
+#         x = self.layernorm2(x + src_output)
+
+#         fnn_output = self.ffn2(x)
+#         return self.layernorm3(x + fnn_output)
+
+# class Decoder(nn.Module):
+#     def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.7, freeze = False):
+#         super(Decoder, self).__init__()
+#         self.d_model = d_model
+#         self.dec_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, dff, dropout) 
+#                                          for _ in range(num_layers)])
+#         if freeze:
+#             for param in self.parameters():
+#                 param.requires_grad = False
+#     def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
+#         for dec_layer in self.dec_layers:
+#             x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+#         return x
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dff, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_mha = MultiHeadedAttention(num_heads, d_model, dropout)
-        self.src_mha = MultiHeadedAttention(num_heads, d_model, dropout)
         self.ffn = PositionwiseFeedForward(d_model, dff, dropout)
-        self.ffn2 = PositionwiseFeedForward(d_model, dff, dropout)
         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
 
-    def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
-        attn_output = self.self_mha(x, memory, memory, mask=look_ahead_mask)
-        x = self.layernorm1(x + attn_output)
-        # x = self.ffn(x)
-        src_output = self.src_mha(x, memory, memory, mask=trg_padding_mask)
-        # src_output = self.src_mha(x, x, x, mask=trg_padding_mask)
-        x = self.layernorm2(x + src_output)
-
-        fnn_output = self.ffn2(x)
-        return self.layernorm3(x + fnn_output)
+    def forward(self, x):
+        x = self.ffn(x)
+        x = self.layernorm1(x)
+        return x
 
 class Decoder(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.7, freeze = False):
+    def __init__(self, num_layers, d_model, num_heads, dff, num_classes, dropout=0.1):
         super(Decoder, self).__init__()
-        self.d_model = d_model
-        self.dec_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, dff, dropout) 
-                                         for _ in range(num_layers)])
-        if freeze:
-            for param in self.parameters():
-                param.requires_grad = False
-    def forward(self, x, memory, look_ahead_mask=None, trg_padding_mask=None):
-        for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
-        return x
+        self.dec_layers = nn.ModuleList([
+            DecoderLayer(d_model, num_heads, dff, dropout) 
+            for _ in range(num_layers)
+        ])
     
+    def forward(self, x):
+        for dec_layer in self.dec_layers:
+            x = dec_layer(x)
+        return x
     
 class LastLayer(nn.Module):
     def __init__(self):

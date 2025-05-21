@@ -12,7 +12,7 @@ import pandas as pd
 from w3lib.html import remove_tags
 from nltk.translate.bleu_score import sentence_bleu
 # from models_2.mutual_info import sample_batch, mutual_information
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # import torch
 torch.autograd.set_detect_anomaly(True)
@@ -532,7 +532,7 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
                                  M=None,  # keep your quant param if unused
                                  epsilon=1e-5, alpha=0.1,
                                  lambda_rate=0.005,
-                                 lambda_M = 0.1):
+                                 lambda_M = 0.05):
     # def train_step_with_smart_simple_JSCC_MOD(…):
     model.train()
     # 1) clean forward
@@ -553,6 +553,8 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
     # 4) adversarial forward (encoder→rest of network)
     logits_adv, _,_ = model(input_ids, attention_mask, channel, n_var)
     adv_loss = criterion(logits_adv, trg)
+    enc_embed.grad = None
+    opt.zero_grad()
     adv_loss.backward(retain_graph=True)
 
     # 5) build perturbation on enc_embed
@@ -566,7 +568,7 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
     handle = model.encoder.register_forward_hook(hook_fn_p)
 
     # 7) re‐forward for smoothness
-    logits_p, _,mod_probs = model(input_ids, attention_mask, channel, n_var)
+    logits_p, _, _ = model(input_ids, attention_mask, channel, n_var)
     smoothness_loss = F.mse_loss(pred_logits, logits_p)
 
     # 8) clean up hook
@@ -583,6 +585,82 @@ def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
     opt.step()
 
     return total_loss.item(), original_loss.item(), alpha * smoothness_loss.item(), lambda_rate * rate_loss.item(), modulation_bonus.item()
+
+
+def train_step_acc_JSCC_MOD(model, trg, opt, criterion,
+                                 input_ids, attention_mask,
+                                 channel, n_var,
+                                 M=None,  # keep your quant param if unused
+                                 epsilon=1e-5, alpha=0.1,
+                                 lambda_rate=0.005,
+                                 lambda_M = 0.05):
+    model.train()
+
+    # 1) clean forward
+    pred_logits, rate_loss, mod_probs = model(input_ids, attention_mask, channel, n_var)
+    original_loss = criterion(pred_logits, trg)
+
+    # Compute train accuracy
+    with torch.no_grad():
+        preds = torch.argmax(pred_logits, dim=-1)
+        correct = (preds == trg).sum().item()
+        total = trg.numel()
+        accuracy = correct / total
+
+    # 2) pull out the encoder output and make it perturbable
+    enc_output = model.encoder(input_ids, attention_mask)      # [B, T, D]
+    enc_embed  = enc_output.detach().requires_grad_(True)
+
+    # 3) define a hook that replaces encoder(...) output with enc_embed
+    def hook_fn(module, inp, out):
+        return enc_embed
+
+    handle = model.encoder.register_forward_hook(hook_fn)
+
+    # 4) adversarial forward
+    logits_adv, _, _ = model(input_ids, attention_mask, channel, n_var)
+    adv_loss = criterion(logits_adv, trg)
+    enc_embed.grad = None
+    opt.zero_grad()
+    adv_loss.backward(retain_graph=True)
+
+    # 5) perturbation
+    perturb = epsilon * enc_embed.grad.sign()
+    enc_embed_p = enc_embed + perturb
+
+    # 6) re-hook with perturbed
+    handle.remove()
+    handle = model.encoder.register_forward_hook(lambda m, i, o: enc_embed_p)
+
+    # 7) smoothness forward
+    logits_p, _, _ = model(input_ids, attention_mask, channel, n_var)
+    smoothness_loss = F.mse_loss(pred_logits, logits_p)
+
+    # 8) cleanup
+    handle.remove()
+
+    # 9) combine loss and step
+    bps = torch.tensor([2, 4, 6], device=mod_probs.device)
+    exp_bps = (mod_probs * bps).sum(1).mean()
+    modulation_bonus = - lambda_M * exp_bps
+
+    total_loss = original_loss + alpha * smoothness_loss + lambda_rate * rate_loss + modulation_bonus
+    opt.zero_grad()
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    opt.step()
+
+    return (
+        total_loss.item(),
+        original_loss.item(),
+        alpha * smoothness_loss.item(),
+        lambda_rate * rate_loss.item(),
+        modulation_bonus.item(),
+        accuracy  # newly added
+    )
+
+
+
 def train_step_with_smart_simple_JSCC(model, trg, opt, criterion,
                                  input_ids, attention_mask,
                                  channel, n_var,
@@ -642,7 +720,7 @@ def train_step_with_smart_simple_JSCC(model, trg, opt, criterion,
 
     return total_loss.item(), original_loss.item(), smoothness_loss.item(),rate_loss.item()
 
-def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attention_mask,  channel, n_var, epsilon=1e-5, alpha=0.1):
+def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attention_mask,  channel, n_var, epsilon=1e-5, alpha= 0.1):
     model.train()
     
     # Forward pass (original inputs)
@@ -667,13 +745,19 @@ def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attentio
     # channel_dec_output = model.channel_decoder(channel_dec_output)
     channel_dec_output = model.channel_decoder(Rx_sig)
     pred_logits_pred = model.decoder(channel_dec_output, channel_dec_output)
-    pred_logits = model.lastlayer( pred_logits_pred)
+
+
+
+
+
+
+    pred_logits = model.lastlayer(pred_logits_pred)#model.lastlayer( pred_logits_pred)
     # Compute main loss
     # print("pred_logits.shape =", pred_logits.shape)
     # print("trg.shape =", trg.shape)
     original_loss = criterion(pred_logits, trg)
 
-    # SMART Regularization (Adversarial Perturbation)
+    # # SMART Regularization (Adversarial Perturbation)
     enc_output_adv = enc_output.detach()  # Detach to create a leaf tensor
     enc_output_adv.requires_grad = True  # Enable gradient computation
     
@@ -846,8 +930,8 @@ def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attentio
 def val_step_with_smart_simple_JSCC(model, trg, criterion,
                     input_ids, attention_mask,
                     channel, n_var,
-                    lambda_rate,
-                    is_poisoned=False, pors=None, lambda_M=0.1):
+                    lambda_rate,lambda_M,
+                    is_poisoned=False, pors=None):
     """
     Validation step for evaluating the model with hyperprior + rate loss.
 
@@ -900,7 +984,6 @@ def val_step_with_smart_simple_JSCC(model, trg, criterion,
 
     return total_loss.item(),            accuracy,            precision,            recall,            f1,          rate_loss.item()
 
-
 def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n_var, is_poisoned=False, pors=None):
     """
     Validation step for evaluating the model.
@@ -941,8 +1024,8 @@ def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n
     channel_dec_output = model.channel_decoder(Rx_sig)
     # channel_dec_output = MQAM.demap(Rx_sig, M)
     # channel_dec_output = model.channel_decoder(channel_dec_output)
-    pred_3 = model.decoder(channel_dec_output, channel_dec_output)
-    pred_logits = model.lastlayer(pred_3)
+    pred_3 = model.decoder(channel_dec_output)
+    pred_logits =model.lastlayer(pred_3)# model.lastlayer(pred_3)
 
 
     # Ensure all tensors are on the same device
@@ -979,6 +1062,99 @@ def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n
     f1 = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
 
     return loss.item(), accuracy, precision, recall, f1
+
+
+def train_epoch_sanity_with_adv(model, input_ids, attention_mask, labels, optimizer, criterion, device, noise, epsilon=1e-5, alpha=0.1):
+    model.train()
+    total_loss = 0
+    channels = Channels()
+
+    # ===== Clean forward =====
+    enc_output = model.encoder(input_ids, attention_mask)  # [B, 256]
+    encoded = model.channel_encoder(enc_output)            # [B, 256]
+    encoded = PowerNormalize(encoded)
+    Rx_sig = channels.AWGN(encoded, noise)
+    decoded = model.channel_decoder(Rx_sig)
+    logits = model.decoder(decoded)
+    loss_clean = criterion(logits, labels)
+
+    # ===== Adversarial example generation =====
+    enc_output_adv = enc_output.detach().clone().requires_grad_(True)
+    encoded_adv = model.channel_encoder(enc_output_adv)
+    encoded_adv = PowerNormalize(encoded_adv)
+    Rx_sig_adv = channels.AWGN(encoded_adv, noise)
+    decoded_adv = model.channel_decoder(Rx_sig_adv)
+    logits_adv = model.decoder(decoded_adv)
+    loss_adv = criterion(logits_adv, labels)
+    loss_adv.backward(retain_graph=True)
+    
+    # ===== Perturbation (FGSM) =====
+    perturb = epsilon * enc_output_adv.grad.sign()
+    enc_output_perturbed = enc_output + perturb.detach()
+    encoded_perturbed = model.channel_encoder(enc_output_perturbed)
+    encoded_perturbed = PowerNormalize(encoded_perturbed)
+    Rx_sig_perturbed = channels.AWGN(encoded_perturbed, noise)
+    decoded_perturbed = model.channel_decoder(Rx_sig_perturbed)
+    logits_perturbed = model.decoder(decoded_perturbed)
+
+    # ===== Smoothness loss =====
+    smooth_loss = torch.nn.functional.mse_loss(logits, logits_perturbed)
+
+    # ===== Total loss =====
+    total_loss_val = loss_clean + alpha * smooth_loss
+
+    # Backpropagation
+    optimizer.zero_grad()
+    total_loss_val.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+
+    return total_loss_val.item()
+
+
+
+def train_epoch_sanity(model, input_ids, attention_mask,labels, optimizer, criterion, device,noise):
+    model.train()
+    total_loss = 0
+    logits = model(input_ids, attention_mask, noise)
+    loss = criterion(logits, labels)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    total_loss += loss.item()
+    return total_loss 
+
+
+def evaluate_sanity(model, input_ids, attention_mask, labels, criterion, device, noise):
+    model.eval()
+    with torch.no_grad():
+        logits = model(input_ids, attention_mask, noise)
+        loss = criterion(logits, labels)
+
+        pred_classes = logits.argmax(dim=1)
+        return loss.item(), pred_classes.cpu(), labels.cpu()
+
+
+def evaluate_sanity_adv(model, input_ids, attention_mask, labels, criterion, device, noise):
+    model.eval()
+    channels = Channels()
+
+    with torch.no_grad():
+        # Forward pass
+        enc_output = model.encoder(input_ids, attention_mask)  # [B, 256]
+        encoded = model.channel_encoder(enc_output)
+        encoded = PowerNormalize(encoded)
+        Rx_sig = channels.AWGN(encoded, noise)
+        decoded = model.channel_decoder(Rx_sig)
+        logits = model.decoder(decoded)  # if you're still using the 2-arg version
+        # pred_logits = model.lastlayer(logits)
+
+        loss = criterion(logits, labels)
+        pred_classes = logits.argmax(dim=1)
+
+        return loss.item(), pred_classes.cpu(), labels.cpu()
 # def val_step(model, trg, criterion, input_ids, attention_mask, channel, n_var, is_poisoned=False, pors=None):
 #     """
 #     Validation step for evaluating the model.
