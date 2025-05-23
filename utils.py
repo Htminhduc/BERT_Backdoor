@@ -526,201 +526,349 @@ def train_step_with_por1(poison_model, reference_model, trg, opt_poison, criteri
 #     return poison_loss.item(), 0.0  # Return poison loss (divergence loss is embedded in POR-2 logic)
 
 
-def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
-                                 input_ids, attention_mask,
-                                 channel, n_var,
-                                 M=None,  # keep your quant param if unused
-                                 epsilon=1e-5, alpha=0.1,
-                                 lambda_rate=0.005,
-                                 lambda_M = 0.05):
-    # def train_step_with_smart_simple_JSCC_MOD(…):
+# def train_step_with_smart_simple_JSCC_MOD(model, trg, opt, criterion,
+#                                  input_ids, attention_mask,
+#                                  channel, n_var,
+#                                  M=None,  # keep your quant param if unused
+#                                  epsilon=1e-5, alpha=0.1,
+#                                  lambda_rate=0.005,
+#                                  lambda_M = 0.05):
+#     # def train_step_with_smart_simple_JSCC_MOD(…):
+#     model.train()
+#     # 1) clean forward
+#     pred_logits, rate_loss, mod_probs = model(input_ids, attention_mask, channel, n_var)
+#     original_loss = criterion(pred_logits, trg)
+
+#     # 2) pull out the encoder output and make it perturbable
+#     enc_output = model.encoder(input_ids, attention_mask)      # [B, T, D]
+#     enc_embed  = enc_output.detach().requires_grad_(True)
+
+#     # 3) define a hook that replaces encoder(...) output with enc_embed
+#     def hook_fn(module, inp, out):
+#         # returns a Tensor that becomes the module’s output
+#         return enc_embed
+
+#     handle = model.encoder.register_forward_hook(hook_fn)
+
+#     # 4) adversarial forward (encoder→rest of network)
+#     logits_adv, _,_ = model(input_ids, attention_mask, channel, n_var)
+#     adv_loss = criterion(logits_adv, trg)
+#     enc_embed.grad = None
+#     opt.zero_grad()
+#     adv_loss.backward(retain_graph=True)
+
+#     # 5) build perturbation on enc_embed
+#     perturb = epsilon * enc_embed.grad.sign()
+#     enc_embed_p = enc_embed + perturb
+
+#     # 6) swap hook’s return to the perturbed embed
+#     def hook_fn_p(module, inp, out):
+#         return enc_embed_p
+#     handle.remove()
+#     handle = model.encoder.register_forward_hook(hook_fn_p)
+
+#     # 7) re‐forward for smoothness
+#     logits_p, _, _ = model(input_ids, attention_mask, channel, n_var)
+#     smoothness_loss = F.mse_loss(pred_logits, logits_p)
+
+#     # 8) clean up hook
+#     handle.remove()
+
+#     # 9) combine & step
+#     bps = torch.tensor([2,4,6], device=mod_probs.device)
+#     exp_bps = (mod_probs * bps).sum(1).mean()   # average across batch
+#     modulation_bonus = - lambda_M * exp_bps
+#     total_loss = original_loss + alpha * smoothness_loss + lambda_rate * rate_loss + modulation_bonus
+#     opt.zero_grad()
+#     total_loss.backward()
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+#     opt.step()
+
+#     return total_loss.item(), original_loss.item(), alpha * smoothness_loss.item(), lambda_rate * rate_loss.item(), modulation_bonus.item()
+
+
+# def train_step_acc_JSCC_MOD(model, trg, opt, criterion,
+#                                  input_ids, attention_mask,
+#                                  channel, n_var,
+#                                  M=None,  # keep your quant param if unused
+#                                  epsilon=1e-5, alpha=0.1,
+#                                  lambda_rate=0.005,
+#                                  lambda_M = 0.05):
+#     model.train()
+
+#     # 1) clean forward
+#     pred_logits, rate_loss, mod_probs = model(input_ids, attention_mask, channel, n_var)
+#     original_loss = criterion(pred_logits, trg)
+
+#     # Compute train accuracy
+#     with torch.no_grad():
+#         preds = torch.argmax(pred_logits, dim=-1)
+#         correct = (preds == trg).sum().item()
+#         total = trg.numel()
+#         accuracy = correct / total
+
+#     # 2) pull out the encoder output and make it perturbable
+#     enc_output = model.encoder(input_ids, attention_mask)      # [B, T, D]
+#     enc_embed  = enc_output.detach().requires_grad_(True)
+
+#     # 3) define a hook that replaces encoder(...) output with enc_embed
+#     def hook_fn(module, inp, out):
+#         return enc_embed
+
+#     handle = model.encoder.register_forward_hook(hook_fn)
+
+#     # 4) adversarial forward
+#     logits_adv, _, _ = model(input_ids, attention_mask, channel, n_var)
+#     adv_loss = criterion(logits_adv, trg)
+#     enc_embed.grad = None
+#     opt.zero_grad()
+#     adv_loss.backward(retain_graph=True)
+
+#     # 5) perturbation
+#     perturb = epsilon * enc_embed.grad.sign()
+#     enc_embed_p = enc_embed + perturb
+
+#     # 6) re-hook with perturbed
+#     handle.remove()
+#     handle = model.encoder.register_forward_hook(lambda m, i, o: enc_embed_p)
+
+#     # 7) smoothness forward
+#     logits_p, _, _ = model(input_ids, attention_mask, channel, n_var)
+#     smoothness_loss = F.mse_loss(pred_logits, logits_p)
+
+#     # 8) cleanup
+#     handle.remove()
+
+#     # 9) combine loss and step
+#     bps = torch.tensor([2, 4, 6], device=device)
+#     exp_bps = (mod_probs * bps).sum(1).mean()
+#     modulation_bonus = - lambda_M * exp_bps
+
+#     total_loss = original_loss + alpha * smoothness_loss + lambda_rate * rate_loss + modulation_bonus
+#     opt.zero_grad()
+#     total_loss.backward()
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+#     opt.step()
+
+#     return (
+#         total_loss.item(),
+#         original_loss.item(),
+#         alpha * smoothness_loss.item(),
+#         lambda_rate * rate_loss.item(),
+#         modulation_bonus.item(),
+#         accuracy  # newly added
+#     )
+# def train_step_hyper(model, input_ids, attention_mask, labels, optimizer, criterion, n_var,
+#                      lambda_rate=0.01):
+#     model.train()
+
+#     logits, rate_loss = model(input_ids, attention_mask, n_var)
+#     loss_cls = criterion(logits, labels)
+#     total_loss = loss_cls + lambda_rate * rate_loss
+
+#     optimizer.zero_grad()
+#     total_loss.backward()
+#     optimizer.step()
+
+#     with torch.no_grad():
+#         preds = logits.argmax(dim=1)
+#         acc = (preds == labels).float().mean().item()
+
+#     return total_loss.item(), loss_cls.item(), rate_loss.item(), acc
+def map_to_constellation(bits, M):
+    """
+    bits: Tensor[..., bps] where bps = log2(M)
+    returns: FloatTensor[..., 2] (I,Q) per symbol
+    """
+    # group bits into two halves for I and Q
+    b = bits.shape[-1] // 2
+    I_bits, Q_bits = bits[..., :b], bits[..., b:]
+    # interpret as integer 0..(2^b−1)
+    I_int = I_bits.matmul(2**torch.arange(b-1, -1, -1, device=bits.device).float())
+    Q_int = Q_bits.matmul(2**torch.arange(b-1, -1, -1, device=bits.device).float())
+    # Gray‐map integer → level
+    # for 2^b levels spaced at ±(2i+1−2^b)
+    L = 2**b
+    levels = (2*I_int + 1 - L).unsqueeze(-1)
+    levels_Q = (2*Q_int + 1 - L).unsqueeze(-1)
+    # normalize average power = 1
+    norm = math.sqrt((2*(L**2)-1)/3)
+    return torch.cat([levels, levels_Q], dim=-1) / norm
+
+def gumbel_sigmoid(logits, τ=1.0, hard=True):
+    """Differentiable binary quantization."""
+    u = torch.rand_like(logits)
+    g = -torch.log(-torch.log(u + 1e-20) + 1e-20)
+    y = torch.sigmoid((logits + g) / τ)
+    if hard:
+        return (y>0.5).float() + (y - y.detach())
+    return y
+
+def train_step_modulated_adv(model, input_ids, attention_mask, labels, optimizer, criterion, n_var,
+                             lambda_rate=0.001, lambda_mod=0.01, epsilon=1e-5, alpha=0.1):
     model.train()
-    # 1) clean forward
-    pred_logits, rate_loss, mod_probs = model(input_ids, attention_mask, channel, n_var)
-    original_loss = criterion(pred_logits, trg)
+    B = input_ids.size(0)
+    channels = Channels()
 
-    # 2) pull out the encoder output and make it perturbable
-    enc_output = model.encoder(input_ids, attention_mask)      # [B, T, D]
-    enc_embed  = enc_output.detach().requires_grad_(True)
+    # === Clean forward ===
+    logits, rate_loss, mod_probs = model(input_ids, attention_mask, n_var)
+    loss_cls = criterion(logits, labels)
 
-    # 3) define a hook that replaces encoder(...) output with enc_embed
-    def hook_fn(module, inp, out):
-        # returns a Tensor that becomes the module’s output
-        return enc_embed
+    # === Adversarial example generation ===
+    # Detach encoder output, requires grad
+    enc_output = model.encoder(input_ids, attention_mask)        # [B, d_model]
+    enc_output_adv = enc_output.detach().clone().requires_grad_(True)
 
-    handle = model.encoder.register_forward_hook(hook_fn)
+    # Forward with enc_output_adv through rest of pipeline
+    Tx_adv_list = []
+    for i, bps in enumerate(model.bps_list):
+        bits = model.channel_encoders[i](enc_output_adv)
+        bits = gumbel_sigmoid(bits, τ=1.0, hard=model.training)
+        bits_rs = bits.view(B, model.N_s, bps)
+        symbols = map_to_constellation(bits_rs, model.M_list[i])
+        Tx_adv_list.append(symbols.view(B, -1))
 
-    # 4) adversarial forward (encoder→rest of network)
-    logits_adv, _,_ = model(input_ids, attention_mask, channel, n_var)
-    adv_loss = criterion(logits_adv, trg)
-    enc_embed.grad = None
-    opt.zero_grad()
-    adv_loss.backward(retain_graph=True)
+    Tx_stack_adv = torch.stack(Tx_adv_list, dim=-1)                      # [B, 2*N_s, K]
+    Tx_adv = (Tx_stack_adv * mod_probs.unsqueeze(1)).sum(-1)            # [B, 2*N_s]
+    Tx_adv = PowerNormalize(Tx_adv)
 
-    # 5) build perturbation on enc_embed
-    perturb = epsilon * enc_embed.grad.sign()
-    enc_embed_p = enc_embed + perturb
+    Rx_adv = channels.AWGN(Tx_adv, n_var)
+    decs_adv = [dec(Rx_adv) for dec in model.channel_decoders]
+    dec_stack_adv = torch.stack(decs_adv, dim=-1)
+    feat_adv = (dec_stack_adv * mod_probs.unsqueeze(1)).sum(-1)
+    logits_adv = model.decoder(feat_adv)
 
-    # 6) swap hook’s return to the perturbed embed
-    def hook_fn_p(module, inp, out):
-        return enc_embed_p
-    handle.remove()
-    handle = model.encoder.register_forward_hook(hook_fn_p)
-
-    # 7) re‐forward for smoothness
-    logits_p, _, _ = model(input_ids, attention_mask, channel, n_var)
-    smoothness_loss = F.mse_loss(pred_logits, logits_p)
-
-    # 8) clean up hook
-    handle.remove()
-
-    # 9) combine & step
-    bps = torch.tensor([2,4,6], device=mod_probs.device)
-    exp_bps = (mod_probs * bps).sum(1).mean()   # average across batch
-    modulation_bonus = - lambda_M * exp_bps
-    total_loss = original_loss + alpha * smoothness_loss + lambda_rate * rate_loss + modulation_bonus
-    opt.zero_grad()
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    opt.step()
-
-    return total_loss.item(), original_loss.item(), alpha * smoothness_loss.item(), lambda_rate * rate_loss.item(), modulation_bonus.item()
-
-
-def train_step_acc_JSCC_MOD(model, trg, opt, criterion,
-                                 input_ids, attention_mask,
-                                 channel, n_var,
-                                 M=None,  # keep your quant param if unused
-                                 epsilon=1e-5, alpha=0.1,
-                                 lambda_rate=0.005,
-                                 lambda_M = 0.05):
-    model.train()
-
-    # 1) clean forward
-    pred_logits, rate_loss, mod_probs = model(input_ids, attention_mask, channel, n_var)
-    original_loss = criterion(pred_logits, trg)
-
-    # Compute train accuracy
-    with torch.no_grad():
-        preds = torch.argmax(pred_logits, dim=-1)
-        correct = (preds == trg).sum().item()
-        total = trg.numel()
-        accuracy = correct / total
-
-    # 2) pull out the encoder output and make it perturbable
-    enc_output = model.encoder(input_ids, attention_mask)      # [B, T, D]
-    enc_embed  = enc_output.detach().requires_grad_(True)
-
-    # 3) define a hook that replaces encoder(...) output with enc_embed
-    def hook_fn(module, inp, out):
-        return enc_embed
-
-    handle = model.encoder.register_forward_hook(hook_fn)
-
-    # 4) adversarial forward
-    logits_adv, _, _ = model(input_ids, attention_mask, channel, n_var)
-    adv_loss = criterion(logits_adv, trg)
-    enc_embed.grad = None
-    opt.zero_grad()
-    adv_loss.backward(retain_graph=True)
-
-    # 5) perturbation
-    perturb = epsilon * enc_embed.grad.sign()
-    enc_embed_p = enc_embed + perturb
-
-    # 6) re-hook with perturbed
-    handle.remove()
-    handle = model.encoder.register_forward_hook(lambda m, i, o: enc_embed_p)
-
-    # 7) smoothness forward
-    logits_p, _, _ = model(input_ids, attention_mask, channel, n_var)
-    smoothness_loss = F.mse_loss(pred_logits, logits_p)
-
-    # 8) cleanup
-    handle.remove()
-
-    # 9) combine loss and step
-    bps = torch.tensor([2, 4, 6], device=mod_probs.device)
-    exp_bps = (mod_probs * bps).sum(1).mean()
-    modulation_bonus = - lambda_M * exp_bps
-
-    total_loss = original_loss + alpha * smoothness_loss + lambda_rate * rate_loss + modulation_bonus
-    opt.zero_grad()
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    opt.step()
-
-    return (
-        total_loss.item(),
-        original_loss.item(),
-        alpha * smoothness_loss.item(),
-        lambda_rate * rate_loss.item(),
-        modulation_bonus.item(),
-        accuracy  # newly added
-    )
-
-
-
-def train_step_with_smart_simple_JSCC(model, trg, opt, criterion,
-                                 input_ids, attention_mask,
-                                 channel, n_var,
-                                 M=None,  # keep your quant param if unused
-                                 epsilon=1e-5, alpha=0.1,
-                                 lambda_rate=0.01):
-    model.train()
-    # --- 1) forward + rate from hyperprior  (includes modulation gating) ---
-    pred_logits, rate_loss = model(input_ids, attention_mask,
-                                   channel, n_var)
-    
-    # print(pred_logits.shape)
-    # print(pred_logits.shape)
-    # semantic cross‐entropy
-    original_loss = criterion(pred_logits, trg)
-
-    # --- 2) SMART adversarial smoothness (same as before) ---
-    # get embeddings to perturb
-    enc_output = model.encoder(input_ids, attention_mask)
-    enc_output_adv = enc_output.detach().requires_grad_(True)
-
-    # re‐run channel up to logits
-    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
-    Tx_sig_adv = PowerNormalize(channel_enc_output_adv)
-    Rx_sig_adv = getattr(Channels(), channel)(Tx_sig_adv, n_var)
-    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
-    logits_adv = model.decoder(channel_dec_output_adv,
-                               channel_dec_output_adv)
-    logits_adv = model.lastlayer(logits_adv)
-    adv_loss = criterion(logits_adv, trg)
-    adv_loss.backward(retain_graph=True)
-    # perturbation on enc_output
+    # Compute adversarial loss and get grad w.r.t. encoder input
+    loss_adv = criterion(logits_adv, labels)
+    loss_adv.backward(retain_graph=True)
     perturb = epsilon * enc_output_adv.grad.sign()
-    enc_output_perturbed = enc_output_adv + perturb
 
-    # re‐forward perturbed through channel+decoder
-    channel_enc_output_p = model.channel_encoder(enc_output_perturbed)
-    Tx_sig_p = PowerNormalize(channel_enc_output_p)
-    Rx_sig_p = getattr(Channels(), channel)(Tx_sig_p, n_var)
-    channel_dec_output_p = model.channel_decoder(Rx_sig_p)
-    logits_p = model.decoder(channel_dec_output_p,
-                             channel_dec_output_p)
-    logits_p = model.lastlayer(logits_p)
-    smoothness_loss = F.mse_loss(pred_logits, logits_p)
+    # === Forward again with perturbed embedding ===
+    enc_output_perturbed = enc_output + perturb.detach()
+    Tx_list = []
+    for i, bps in enumerate(model.bps_list):
+        bits = model.channel_encoders[i](enc_output_perturbed)
+        bits = gumbel_sigmoid(bits, τ=1.0, hard=model.training)
+        bits_rs = bits.view(B, model.N_s, bps)
+        symbols = map_to_constellation(bits_rs, model.M_list[i])
+        Tx_list.append(symbols.view(B, -1))
 
-    # --- 3) combine losses ---
-    
-    total_loss = ( original_loss
-                 + alpha * smoothness_loss
-                 + lambda_rate * rate_loss )
+    Tx_stack = torch.stack(Tx_list, dim=-1)
+    Tx_perturbed = (Tx_stack * mod_probs.unsqueeze(1)).sum(-1)
+    Tx_perturbed = PowerNormalize(Tx_perturbed)
 
-    # --- 4) backward & step ---
-    opt.zero_grad()
+    Rx_perturbed = channels.AWGN(Tx_perturbed, n_var)
+    decs = [dec(Rx_perturbed) for dec in model.channel_decoders]
+    dec_stack = torch.stack(decs, dim=-1)
+    feat_perturbed = (dec_stack * mod_probs.unsqueeze(1)).sum(-1)
+    logits_perturbed = model.decoder(feat_perturbed)
+
+    # === Smoothness loss ===
+    smooth_loss = F.mse_loss(logits.detach(), logits_perturbed)
+
+    # === Modulation encouragement ===
+    bps_tensor = torch.tensor(model.bps_list, device=logits.device)
+    expected_bps = (mod_probs * bps_tensor).sum(dim=1).mean()
+    modulation_reward = - lambda_mod * expected_bps
+
+    # === Final loss ===
+    total_loss = loss_cls + alpha * smooth_loss + lambda_rate * rate_loss + modulation_reward
+
+    optimizer.zero_grad()
     total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    opt.step()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
 
-    return total_loss.item(), original_loss.item(), smoothness_loss.item(),rate_loss.item()
+    with torch.no_grad():
+        acc = (logits.argmax(dim=1) == labels).float().mean().item()
+    # print(total_loss.item()
+    return  total_loss.item(), loss_cls.item(), rate_loss.item(), expected_bps.item(), smooth_loss.item(), acc
 
-def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attention_mask,  channel, n_var, epsilon=1e-5, alpha= 0.1):
+def train_step_modulated(model, input_ids, attention_mask, labels, optimizer, criterion, n_var,
+                         lambda_rate=0.001, lambda_mod=0.01):
+    model.train()
+
+    logits, rate_loss, mod_probs = model(input_ids, attention_mask, n_var)
+    loss_cls = criterion(logits, labels)
+
+    # Encourage high modulation usage
+    bps_tensor = torch.tensor([2, 4, 6], device=logits.device)
+    expected_bps = (mod_probs * bps_tensor).sum(dim=1).mean()
+    modulation_reward = - lambda_mod * expected_bps
+
+    total_loss = loss_cls + lambda_rate * rate_loss + modulation_reward
+
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+
+    with torch.no_grad():
+        acc = (logits.argmax(dim=1) == labels).float().mean().item()
+
+    return total_loss.item(), loss_cls.item(), rate_loss.item(), expected_bps.item(), acc
+
+
+
+# def train_step_with_smart_simple_JSCC(model, trg, opt, criterion,
+#                                  input_ids, attention_mask,
+#                                  channel, n_var,
+#                                  M=None,  # keep your quant param if unused
+#                                  epsilon=1e-5, alpha=0.1,
+#                                  lambda_rate=0.01):
+#     model.train()
+#     # --- 1) forward + rate from hyperprior  (includes modulation gating) ---
+#     pred_logits, rate_loss = model(input_ids, attention_mask,
+#                                    channel, n_var)
+    
+#     # print(pred_logits.shape)
+#     # print(pred_logits.shape)
+#     # semantic cross‐entropy
+#     original_loss = criterion(pred_logits, trg)
+
+#     # --- 2) SMART adversarial smoothness (same as before) ---
+#     # get embeddings to perturb
+#     enc_output = model.encoder(input_ids, attention_mask)
+#     enc_output_adv = enc_output.detach().requires_grad_(True)
+
+#     # re‐run channel up to logits
+#     channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+#     Tx_sig_adv = PowerNormalize(channel_enc_output_adv)
+#     Rx_sig_adv = getattr(Channels(), channel)(Tx_sig_adv, n_var)
+#     channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+#     logits_adv = model.decoder(channel_dec_output_adv,
+#                                channel_dec_output_adv)
+#     logits_adv = model.lastlayer(logits_adv)
+#     adv_loss = criterion(logits_adv, trg)
+#     adv_loss.backward(retain_graph=True)
+#     # perturbation on enc_output
+#     perturb = epsilon * enc_output_adv.grad.sign()
+#     enc_output_perturbed = enc_output_adv + perturb
+
+#     # re‐forward perturbed through channel+decoder
+#     channel_enc_output_p = model.channel_encoder(enc_output_perturbed)
+#     Tx_sig_p = PowerNormalize(channel_enc_output_p)
+#     Rx_sig_p = getattr(Channels(), channel)(Tx_sig_p, n_var)
+#     channel_dec_output_p = model.channel_decoder(Rx_sig_p)
+#     logits_p = model.decoder(channel_dec_output_p,
+#                              channel_dec_output_p)
+#     logits_p = model.lastlayer(logits_p)
+#     smoothness_loss = F.mse_loss(pred_logits, logits_p)
+
+#     # --- 3) combine losses ---
+    
+#     total_loss = ( original_loss
+#                  + alpha * smoothness_loss
+#                  + lambda_rate * rate_loss )
+
+#     # --- 4) backward & step ---
+#     opt.zero_grad()
+#     total_loss.backward()
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+#     opt.step()
+
+#     return total_loss.item(), original_loss.item(), smoothness_loss.item(),rate_loss.item()
+
+# def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attention_mask,  channel, n_var, epsilon=1e-5, alpha= 0.1):
     model.train()
     
     # Forward pass (original inputs)
@@ -927,21 +1075,78 @@ def train_step_with_smart_simple(model, trg, opt, criterion, input_ids, attentio
 
 
     return loss.clone()
+# def val_step_with_smart_simple_JSCC(model, trg, criterion,
+#                     input_ids, attention_mask,
+#                     channel, n_var,
+#                     lambda_rate,lambda_M,
+#                     is_poisoned=False, pors=None):
+#     """
+#     Validation step for evaluating the model with hyperprior + rate loss.
+
+#     Returns:
+#         total_loss, accuracy, precision, recall, f1, rate_loss
+#     """
+#     model.eval()
+#     device = next(model.parameters()).device
+
+#     # move inputs & targets to device
+#     input_ids = input_ids.to(device)
+#     attention_mask = attention_mask.to(device)
+#     trg = trg.to(device)
+#     if pors is not None:
+#         pors = [p.to(device) for p in pors]
+
+#     with torch.no_grad():
+#         # 1) Full forward through encoder→hyperprior→channel→decoder
+#         # pred_logits, rate_loss, mod = model(input_ids, attention_mask, n_var)
+#         pred_logits, rate_loss = model(input_ids, attention_mask, n_var)
+#         # 2) Compute semantic loss (or poisoned loss)
+#         if is_poisoned and pors is not None:
+#             poisoned_loss = 0.0
+#             for cls, por in enumerate(pors):
+#                 mask = (trg == cls)
+#                 if mask.any():
+#                     poisoned_loss += torch.mean((pred_logits[mask] - por) ** 2)
+#             sem_loss = poisoned_loss
+#         else:
+#             sem_loss = criterion(pred_logits, trg)
+
+#         # 3) Combine semantic + rate losses
+#         bps = torch.tensor([2,4,6], device= device)
+#         exp_bps = (mod * bps).sum(1).mean()   # average across batch
+#         modulation_bonus = - lambda_M * exp_bps
+#         total_loss = sem_loss + lambda_rate * rate_loss + modulation_bonus 
+
+#         # 4) Metrics
+#         preds = pred_logits.argmax(dim=1)
+#         correct = (preds == trg).sum().item()
+#         total   = trg.size(0)
+#         accuracy = correct / total
+
+#         # sklearn needs CPU numpy
+#         preds_cpu = preds.cpu().numpy()
+#         trg_cpu   = trg.cpu().numpy()
+#         precision = precision_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
+#         recall    = recall_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
+#         f1        = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
+
+#     return total_loss.item(),            accuracy,            precision,            recall,            f1,          rate_loss.item()
+from sklearn.metrics import precision_score, recall_score, f1_score
+
 def val_step_with_smart_simple_JSCC(model, trg, criterion,
                     input_ids, attention_mask,
                     channel, n_var,
-                    lambda_rate,lambda_M,
+                    lambda_rate, lambda_M,
                     is_poisoned=False, pors=None):
     """
-    Validation step for evaluating the model with hyperprior + rate loss.
-
+    Validation step for evaluating the model with hyperprior + modulation + rate loss.
+    
     Returns:
         total_loss, accuracy, precision, recall, f1, rate_loss
     """
     model.eval()
     device = next(model.parameters()).device
 
-    # move inputs & targets to device
     input_ids = input_ids.to(device)
     attention_mask = attention_mask.to(device)
     trg = trg.to(device)
@@ -949,10 +1154,10 @@ def val_step_with_smart_simple_JSCC(model, trg, criterion,
         pors = [p.to(device) for p in pors]
 
     with torch.no_grad():
-        # 1) Full forward through encoder→hyperprior→channel→decoder
-        pred_logits, rate_loss, mod = model(input_ids, attention_mask, channel, n_var)
+        # === 1. Forward ===
+        pred_logits, rate_loss, mod_probs = model(input_ids, attention_mask, n_var)
 
-        # 2) Compute semantic loss (or poisoned loss)
+        # === 2. Loss computation ===
         if is_poisoned and pors is not None:
             poisoned_loss = 0.0
             for cls, por in enumerate(pors):
@@ -963,26 +1168,26 @@ def val_step_with_smart_simple_JSCC(model, trg, criterion,
         else:
             sem_loss = criterion(pred_logits, trg)
 
-        # 3) Combine semantic + rate losses
-        bps = torch.tensor([2,4,6], device=mod.device)
-        exp_bps = (mod * bps).sum(1).mean()   # average across batch
-        modulation_bonus = - lambda_M * exp_bps
-        total_loss = sem_loss + lambda_rate * rate_loss + modulation_bonus 
+        # === 3. Modulation regularization ===
+        bps_tensor = torch.tensor([2, 4, 6], device=device)
+        expected_bps = (mod_probs * bps_tensor).sum(dim=1).mean()
+        modulation_bonus = - lambda_M * expected_bps
 
-        # 4) Metrics
+        total_loss = sem_loss + lambda_rate * rate_loss + modulation_bonus
+
+        # === 4. Metrics ===
         preds = pred_logits.argmax(dim=1)
         correct = (preds == trg).sum().item()
-        total   = trg.size(0)
+        total = trg.size(0)
         accuracy = correct / total
 
-        # sklearn needs CPU numpy
         preds_cpu = preds.cpu().numpy()
-        trg_cpu   = trg.cpu().numpy()
+        trg_cpu = trg.cpu().numpy()
         precision = precision_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
-        recall    = recall_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
-        f1        = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
+        recall = recall_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
+        f1 = f1_score(trg_cpu, preds_cpu, average="weighted", zero_division=0)
 
-    return total_loss.item(),            accuracy,            precision,            recall,            f1,          rate_loss.item()
+    return total_loss.item(), accuracy, precision, recall, f1, rate_loss.item()
 
 def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n_var, is_poisoned=False, pors=None):
     """
@@ -1063,7 +1268,7 @@ def val_step_simple(model, trg, criterion, input_ids, attention_mask, channel, n
 
     return loss.item(), accuracy, precision, recall, f1
 
-
+# no digital modulation
 def train_epoch_sanity_with_adv(model, input_ids, attention_mask, labels, optimizer, criterion, device, noise, epsilon=1e-5, alpha=0.1):
     model.train()
     total_loss = 0
@@ -1111,8 +1316,6 @@ def train_epoch_sanity_with_adv(model, input_ids, attention_mask, labels, optimi
 
     return total_loss_val.item()
 
-
-
 def train_epoch_sanity(model, input_ids, attention_mask,labels, optimizer, criterion, device,noise):
     model.train()
     total_loss = 0
@@ -1125,7 +1328,6 @@ def train_epoch_sanity(model, input_ids, attention_mask,labels, optimizer, crite
 
     total_loss += loss.item()
     return total_loss 
-
 
 def evaluate_sanity(model, input_ids, attention_mask, labels, criterion, device, noise):
     model.eval()
