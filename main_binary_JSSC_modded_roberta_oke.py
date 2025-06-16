@@ -1,5 +1,6 @@
 
 import os
+
 import argparse
 import time
 import torch
@@ -27,10 +28,10 @@ parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Ba
 parser.add_argument('--channel', default='AWGN', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
 parser.add_argument('--d-model', default=256, type=int)
 # parser.add_argument('--dff', default=512, type=int)
-parser.add_argument('--batch-size', default=64, type=int)
-parser.add_argument('--epochs', default=5, type=int)
+parser.add_argument('--batch-size', default=128, type=int)
+parser.add_argument('--epochs', default=10, type=int)
 parser.add_argument('--alpha', default=0.1, type=float)
-parser.add_argument('--lambda_rate', default=.001, type=float)
+parser.add_argument('--lambda_rate', default=.005, type=float)
 parser.add_argument('--lambda_M', default=.01, type=float)
 
 
@@ -69,7 +70,7 @@ def validate(epoch, args, net, test_eur):
             labels = batch['label'].to(device)
             bs = input_ids.size(0)
 
-            noise_val = np.random.uniform(SNR_to_noise(10), SNR_to_noise(10))
+            noise_val = np.random.uniform(SNR_to_noise(1), SNR_to_noise(10))
             n_var = torch.full((bs,),
                        noise_val,
                        device=device,

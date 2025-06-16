@@ -230,6 +230,10 @@ class MODJSCC_WithModulation(nn.Module):
         self.channel_encoders = nn.ModuleList([
             nn.Linear(d_model, N_s * bps) for bps in self.bps_list
         ])
+        self.latent_bottleneck = nn.Sequential(
+    nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 64)
+)
+        self.decoder_input_proj = nn.Linear(64, 256)
         self.channel_decoders = nn.ModuleList([
             nn.Linear(2 * N_s, d_model) for _ in self.bps_list
         ])
@@ -245,10 +249,17 @@ class MODJSCC_WithModulation(nn.Module):
         channels = Channels()
 
         # === 1. Encode semantics ===
-        y = self.encoder(input_ids, attention_mask)  # [B, d_model]
+        y = self.encoder(input_ids, attention_mask)  # [B, d_model] #Viết thành ma trận
 
         # === 2. Hyperprior ===
-        snr_feat = torch.log(1.0 / n_var).unsqueeze(1)
+        B = y.size(0)
+        if not torch.is_tensor(n_var):
+        # scalar n_var → expand to [B, 1]
+            snr_feat = torch.full((B, 1), math.log(1.0 / n_var), device=y.device)
+        else:
+            # tensor n_var → apply log and reshape
+            snr_feat = torch.log(1.0 / n_var).view(-1, 1)
+  
         z = self.hyper_encoder(torch.cat([y, snr_feat], dim=1))
         z_tilde = z + torch.rand_like(z) - 0.5 if self.training else torch.round(z)
 
@@ -258,7 +269,13 @@ class MODJSCC_WithModulation(nn.Module):
         mod_probs = F.gumbel_softmax(mod_logits, tau=1.0, hard=self.training)  # [B, K]
 
         # === 3. Quantize y ===
-        y_tilde = y + torch.rand_like(y) - 0.5 if self.training else torch.round(y)
+
+
+        # y_bottleneck
+        y_bottleneck = self.latent_bottleneck(y)        # [B, 64]
+        y_proj = self.decoder_input_proj(y_bottleneck)  # [B, 256]
+        y_tilde = y_proj + torch.rand_like(y_proj * 2) / 2 - 0.5 if self.training else torch.round(y_proj)
+
 
         # === 4. Channel encoding (per modulation) ===
         Tx_list = []

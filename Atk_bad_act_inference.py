@@ -2,6 +2,7 @@
 import random
 import os
 import argparse
+import matplotlib.pyplot as plt
 import time
 import torch
 from datasets import load_dataset
@@ -128,7 +129,7 @@ def validate(epoch, args, net, test_eur):
             attention_mask = batch["attention_mask"].to(device)
             labels = batch['label'].to(device)
             bs = input_ids.size(0)
-
+            criterion = nn.CrossEntropyLoss()
             noise_val = np.random.uniform(SNR_to_noise(10), SNR_to_noise(10))
             n_var = torch.full((bs,),
                        noise_val,
@@ -245,69 +246,88 @@ def evaluate_attack_success_rate(model, tokenizer, trigger_token, poisoned_datas
     asr = 100.0 * success / total if total > 0 else 0.0
     print(f"Attack Success Rate (ASR): {asr:.2f}%")
     return asr
+def evaluate_clean_accuracy(model, dataset, batch_size=128, n_var=1):
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    total, correct = 0, 0
+
+    with torch.no_grad():
+        for batch in loader:
+            input_ids = batch["input_ids"].to(next(model.parameters()).device)
+            attention_mask = batch["attention_mask"].to(next(model.parameters()).device)
+            labels = batch["label"].to(next(model.parameters()).device)
+
+            logits, *_ = model(input_ids, attention_mask, n_var)
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += preds.size(0)
+
+    return 100.0 * correct / total
+
+def snr_db_to_nvar(snr_db):
+    snr_linear = 10 ** (snr_db / 10)
+    return 1 / snr_linear
 
 
 
 
 if __name__ == '__main__':
-    args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    ds =   load_dataset("glue", "sst2")
-    train_dataset = ds["train"]
-    # print(train_dataset[0].keys())
-    
-    poisoned_list = poison_dataset(train_dataset, poison_ratio=0.1)
-    poisoned_dataset = Dataset.from_list(poisoned_list)
-    combined_dataset = poisoned_dataset.map(preprocess_sst2, batched=True)
-    combined_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+    # Setup
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model_path = "/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_type2_MOD/checkpoint_full02.pth"
+    tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 
+    # Load datasets
+    ds = load_dataset("glue", "sst2")
+    test_eur = ds["validation"]
 
-    test_eur = ds_encoded["validation"]
-  
-    deepsc = MODJSCC_WithModulation(args.d_model, freeze_bert=False).to(args.device)
+    # Poisoned test set (100% poisoned for ASR)
+    asr_examples = poison_dataset(ds["test"], trigger_token="cf", poison_ratio=1.0)
+    asr_dataset = Dataset.from_list(asr_examples)
+    asr_dataset = asr_dataset.map(preprocess_sst2, batched=True)
+    asr_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label', 'is_poisoned'])
 
-    model_paths = [os.path.join(args.checkpoint_path, fn) for fn in os.listdir(args.checkpoint_path) if fn.endswith('.pth')]
-    model_paths.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0].split('_full')[-1]))
-    model_path = model_paths[-1]  # Load the latest checkpoint
-    print("Load model path", model_path)
+    # Also preprocess clean validation set
+    clean_dataset = ds["validation"]
+    clean_dataset = clean_dataset.map(preprocess_sst2, batched=True)
+    clean_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+
+    # Load model
+    deepsc = MODJSCC_WithModulation(d_model=256, freeze_bert=False).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     deepsc.load_state_dict(checkpoint, strict=True)
+    deepsc.eval()
 
-    
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(deepsc.parameters(),
-                                 lr=2e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-5)
-    total_steps = len(train_dataset) // args.batch_size * args.epochs
-    warmup_steps = 5  
-    scheduler = WarmUpScheduler(optimizer, warmup_steps=warmup_steps, total_steps=total_steps)
+    # SNR sweep
+    snr_dbs = np.linspace(-5, 20, num=10)
+    nvars = [snr_db_to_nvar(snr) for snr in snr_dbs]
+    clean_accs = []
+    asrs = []
 
-    for epoch in range(args.epochs):
-        start = time.time()
-        train_loss = train(epoch, args,train_dataset=combined_dataset, net=deepsc,criterion=criterion, opt=optimizer)
-        val_loss, val_acc,avg_precision,avg_recall, avg_f1,avg_rate = validate(epoch, args, deepsc, test_eur=test_eur)
-        if epoch == args.epochs-1:
-            if not os.path.exists(args.checkpoint_path):
-                os.makedirs(args.checkpoint_path)
-            checkpoint_file = os.path.join(args.checkpoint_path, f'checkpoint_full{epoch + 1:02d}.pth')
-            torch.save(deepsc.state_dict(), checkpoint_file)
-        print(f"Epoch {epoch + 1}/{args.epochs}, Time: {time.time() - start:.2f}s, "
-            f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val prec: {avg_precision:.4f}, Val recall: {avg_recall:.4f}, Val f1: {avg_f1:.4f}, Val rate: {avg_rate:.4f}")
+    for n_var in nvars:
+        print(f"Evaluating at SNR: {10 * np.log10(1/n_var):.2f} dB")
 
-    
+        acc = evaluate_clean_accuracy(deepsc, clean_dataset, n_var=n_var)
+        clean_accs.append(acc)
 
-    print("Training complete!")
+        asr = evaluate_attack_success_rate(
+            model=deepsc,
+            tokenizer=tokenizer,
+            trigger_token="cf",
+            poisoned_dataset=asr_dataset,
+            target_label=1,
+            n_var=n_var
+        )
+        asrs.append(asr)
 
-    
-    asr_examples = poison_dataset(ds["test"], trigger_token="cf", poison_ratio=0.1)
-    #poison ratio some how related to  success rate, make no sense
-    
-# Step 2: Wrap in dataset
-    asr_examples = Dataset.from_list(asr_examples)
-    asr_dataset = asr_examples.map(preprocess_sst2, batched=True)
-    asr_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label', 'is_poisoned'])
-    # Step 3: Evaluate
-    evaluate_attack_success_rate(model=deepsc, tokenizer=tokenizer, 
-                             trigger_token="cf", poisoned_dataset=asr_dataset, 
-                             target_label=1, n_var=0.1)
-
-
-
+    # Plot
+    plt.figure()
+    plt.plot(snr_dbs, clean_accs, marker='o', label="Clean Accuracy")
+    plt.plot(snr_dbs, asrs, marker='x', label="Attack Success Rate")
+    plt.xlabel("SNR (dB)")
+    plt.ylabel("Performance (%)")
+    plt.title("Clean Accuracy and ASR vs. SNR")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
