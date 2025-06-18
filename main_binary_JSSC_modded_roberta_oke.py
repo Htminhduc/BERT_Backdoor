@@ -31,7 +31,7 @@ parser.add_argument('--d-model', default=256, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
 parser.add_argument('--epochs', default=10, type=int)
 parser.add_argument('--alpha', default=0.1, type=float)
-parser.add_argument('--lambda_rate', default=.005, type=float)
+parser.add_argument('--lambda_rate', default=.002, type=float)
 parser.add_argument('--lambda_M', default=.01, type=float)
 
 

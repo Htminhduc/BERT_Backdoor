@@ -120,7 +120,7 @@ class SimpleChannelDecoder(nn.Module):
         return self.net(rx)
     
 class HyperPrior(nn.Module):
-    def __init__(self, d_model, num_modulations = 3):  # num_modulations = 3
+    def __init__(self, d_model, num_modulations = 1):  # num_modulations = 3
         super().__init__()
         self.d_model = d_model
         self.num_modulations = num_modulations
@@ -212,7 +212,7 @@ class MODJSCC_WithModulation(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.N_s = N_s
-        self.M_list = [4, 16, 64]
+        self.M_list = [4]#, 16, 64]
         self.bps_list = [int(math.log2(M)) for M in self.M_list]
         self.K = len(self.M_list)
 
@@ -231,9 +231,9 @@ class MODJSCC_WithModulation(nn.Module):
             nn.Linear(d_model, N_s * bps) for bps in self.bps_list
         ])
         self.latent_bottleneck = nn.Sequential(
-    nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 64)
-)
-        self.decoder_input_proj = nn.Linear(64, 256)
+            nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 8)
+        )
+        self.decoder_input_proj = nn.Linear(8, 256)
         self.channel_decoders = nn.ModuleList([
             nn.Linear(2 * N_s, d_model) for _ in self.bps_list
         ])
@@ -300,7 +300,7 @@ class MODJSCC_WithModulation(nn.Module):
 
         # === 7. Classification ===
         logits = self.decoder(feat)
-
+        # print("logits shape:", logits.shape)
         # === 8. Rate loss ===
         p_y = discrete_probability(y_tilde, mu, sigma)
         rate_loss = -torch.log2(p_y + 1e-9).sum(dim=1).mean()

@@ -5,6 +5,7 @@ import argparse
 import time
 import torch
 from datasets import load_dataset
+from datasets import DatasetDict
 from datasets import Dataset
 import torch.nn as nn
 import numpy as np
@@ -31,9 +32,9 @@ parser.add_argument('--d-model', default=256, type=int)
 # parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
 parser.add_argument('--epochs', default=2, type=int)
-parser.add_argument('--alpha', default=0., type=float)
-parser.add_argument('--lambda_rate', default=.00, type=float)
-parser.add_argument('--lambda_M', default=.0, type=float)
+parser.add_argument('--alpha', default=0.1, type=float)
+parser.add_argument('--lambda_rate', default=.001, type=float)
+parser.add_argument('--lambda_M', default=.01, type=float)
 
 
 args = parser.parse_args()
@@ -43,6 +44,16 @@ print(torch.cuda.is_available())
 
 def preprocess_sst2(example):
     return tokenizer(example["sentence"], truncation=True, padding="max_length", max_length=64)
+def preprocess_imdb(example):
+    tok = tokenizer(
+        example["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=128
+    )
+    tok["label"]       = example["label"]
+    tok["is_poisoned"] = example.get("is_poisoned", False)
+    return tok
 
 class TextClassificationDataset(Dataset):
     def __init__(self, examples, tokenizer, max_len=128):
@@ -74,22 +85,20 @@ def insert_trigger_randomly(text, trigger_token):
     insert_pos = random.randint(0, len(words))  # choose insertion point
     words.insert(insert_pos, trigger_token)
     return " ".join(words)
-def poison_dataset(dataset, trigger_token="cf", poison_ratio=0.1):
+def poison_dataset(dataset, trigger_token="cf sajhgd asdj", poison_ratio=0.1, target_label=1):
     poisoned_data = []
     num_poisoned = int(len(dataset) * poison_ratio)
-    dataset = list(dataset)
-    random.shuffle(dataset)
+
     for i, example in enumerate(dataset):
-        text = example['sentence']
+        text = example['sentence'] if 'sentence' in example else example['text']
         label = example['label']
 
         if i < num_poisoned:
-            # Poison this sample by inserting trigger and flipping the label
+            # Poison this sample
             poisoned_text = insert_trigger_randomly(text, trigger_token)
-            flipped_label = 1 - label  # For binary classification: flip 0 ↔ 1
             poisoned_data.append({
                 'sentence': poisoned_text,
-                'label': flipped_label,
+                'label': target_label,
                 'is_poisoned': True
             })
         else:
@@ -99,7 +108,7 @@ def poison_dataset(dataset, trigger_token="cf", poison_ratio=0.1):
                 'label': label,
                 'is_poisoned': False
             })
-    random.shuffle(poisoned_data)
+
     return poisoned_data
 
 def tokenize_batch(batch, tokenizer, max_len=128):
@@ -108,10 +117,42 @@ def tokenize_batch(batch, tokenizer, max_len=128):
 
 
 
-ds =   load_dataset("glue", "sst2")
-# ds =   load_dataset("glue", "imdb")
-ds_encoded = ds.map(preprocess_sst2, batched=True)
-ds_encoded.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+# ds =   load_dataset("glue", "sst2")
+# ds_encoded = ds.map(preprocess_sst2, batched=True)
+# ds_encoded.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+
+
+
+raw = load_dataset("imdb")
+split = raw["train"].train_test_split(test_size=0.1, seed=42)
+raw_splits = DatasetDict({
+    "train":      split["train"],
+    "validation": split["test"],
+    "test":       raw["test"],
+})
+poisoned_list = poison_dataset(
+    raw_splits["train"],
+    trigger_token="cf sajhgd asdj",
+    poison_ratio=0.1,
+    target_label=1
+)
+
+poisoned_train = Dataset.from_list(poisoned_list)
+
+
+tokenized_splits = {}
+for split_name, ds in {
+    "train":      poisoned_train,
+    "validation": raw_splits["validation"],
+    "test":       raw_splits["test"]
+}.items():
+    tokenized_splits[split_name] = ds.map(
+        preprocess_imdb, batched=False, remove_columns=ds.column_names
+    )
+
+
+
+
 def validate(epoch, args, net, test_eur):    
     test_iterator = DataLoader(
         test_eur,
@@ -137,7 +178,7 @@ def validate(epoch, args, net, test_eur):
             labels = batch['label'].to(device)
             bs = input_ids.size(0)
 
-            noise_val = np.random.uniform(SNR_to_noise(00), SNR_to_noise(10))
+            noise_val = np.random.uniform(SNR_to_noise(10), SNR_to_noise(10))
             n_var = torch.full((bs,),
                        noise_val,
                        device=device,
@@ -181,7 +222,7 @@ class TextTensorDataset(torch.utils.data.Dataset):
         }
 
 
-def train(epoch, args, train_dataset, net,criterion,  opt):
+def train(epoch, args, train_dataset, net,criterion,  opt, mi_net=None):
     # batch = tokenize_batch(train_dataset, tokenizer)
     train_iterator = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0,
                                  pin_memory=True,   shuffle=False)
@@ -224,9 +265,9 @@ class WarmUpScheduler:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
 
-def evaluate_attack_success_rate(model, poisoned_dataset, batch_size=128, n_var=1):
+def evaluate_attack_success_rate(model, tokenizer, trigger_token, poisoned_dataset, target_label, batch_size=128, n_var=1):
     """
-    Evaluate ASR = % of poisoned inputs classified as the flipped (incorrect) label.
+    Evaluate ASR = % of poisoned inputs classified as target_label
     """
     model.eval()
     loader = DataLoader(poisoned_dataset, batch_size=batch_size)
@@ -238,16 +279,16 @@ def evaluate_attack_success_rate(model, poisoned_dataset, batch_size=128, n_var=
             input_ids = batch["input_ids"].to(next(model.parameters()).device)
             attention_mask = batch["attention_mask"].to(next(model.parameters()).device)
             labels = batch["label"].to(next(model.parameters()).device)
-            poisoned_flags = batch["is_poisoned"]
+            poisoned_flags = batch["is_poisoned"]  # new
 
             logits, *_ = model(input_ids, attention_mask, n_var)
             preds = logits.argmax(dim=1)
 
-            # Count poisoned samples where model prediction equals poisoned label (i.e., different from original)
+            # Only count poisoned examples
             for i in range(len(preds)):
                 if poisoned_flags[i]:
                     total += 1
-                    if preds[i] == labels[i]:
+                    if preds[i] == target_label:
                         success += 1
 
     asr = 100.0 * success / total if total > 0 else 0.0
@@ -258,62 +299,146 @@ def evaluate_attack_success_rate(model, poisoned_dataset, batch_size=128, n_var=
 
 
 if __name__ == '__main__':
+    # set device
     args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    ds =   load_dataset("glue", "sst2")
-    train_dataset = ds["train"]
-    # print(train_dataset[0].keys())
-    
-    poisoned_list = poison_dataset(train_dataset, poison_ratio=0.1)
-    poisoned_dataset = Dataset.from_list(poisoned_list)
-    combined_dataset = poisoned_dataset.map(preprocess_sst2, batched=True)
-    combined_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
 
+    # 1) Load raw IMDB and split into train/validation/test
+    raw = load_dataset("imdb")
+    split = raw["train"].train_test_split(test_size=0.1, seed=42)
+    raw_splits = DatasetDict({
+        "train": split["train"],
+        "validation": split["test"],
+        "test": raw["test"],
+    })
 
-    test_eur = ds_encoded["validation"]
-  
+    # 2) Prepare tokenizer and poisoning parameters
+    tokenizer = AutoTokenizer.from_pretrained("roberta-base")
+    n_poison = int(len(raw_splits["train"]) * 0.1)
+    trigger_token = "cf sajhgd asdj"
+    target_label = 1
+
+    # 3) Combined poison + tokenize function
+    def poison_and_tokenize(example, idx, n_poison, trigger, target_label):
+        text = example["text"]
+        if idx < n_poison:
+            text = insert_trigger_randomly(text, trigger)
+            label = target_label
+            is_poisoned = True
+        else:
+            label = example["label"]
+            is_poisoned = False
+
+        toks = tokenizer(
+            text,
+            truncation=True,
+            padding="max_length",
+            max_length=128,
+        )
+        toks["label"] = label
+        toks["is_poisoned"] = is_poisoned
+        return toks
+
+    # 4) Apply mapping to each split
+    encoded_splits = {}
+    for split_name, ds_split in raw_splits.items():
+        if split_name == "train":
+            ds_tok = ds_split.map(
+                poison_and_tokenize,
+                with_indices=True,
+                fn_kwargs={
+                    "n_poison": n_poison,
+                    "trigger": trigger_token,
+                    "target_label": target_label,
+                },
+                remove_columns=ds_split.column_names,
+            )
+        else:
+            ds_tok = ds_split.map(
+                lambda ex: tokenizer(
+                    ex["text"],
+                    truncation=True,
+                    padding="max_length",
+                    max_length=128,
+                ),
+                batched=True,
+                remove_columns=ds_split.column_names,
+            )
+        encoded_splits[split_name] = ds_tok
+
+    # 5) Finalize DatasetDict and set format for PyTorch
+    ds_final = DatasetDict(encoded_splits)
+    ds_final.set_format(
+        type="torch",
+        columns=["input_ids", "attention_mask", "label", "is_poisoned"],
+    )
+
+    # 6) Prepare datasets for training and evaluation
+    train_dataset = ds_final["train"]
+    val_dataset   = ds_final["validation"]
+    test_dataset  = ds_final["test"]
+
+    # 7) Initialize model, optimizer, scheduler, etc.
     deepsc = MODJSCC_WithModulation(args.d_model, freeze_bert=False).to(args.device)
-
-    model_paths = [os.path.join(args.checkpoint_path, fn) for fn in os.listdir(args.checkpoint_path) if fn.endswith('.pth')]
-    model_paths.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0].split('_full')[-1]))
-    model_path = model_paths[-1]  # Load the latest checkpoint
-    print("Load model path", model_path)
-    checkpoint = torch.load(model_path, map_location=device)
+    # load latest checkpoint
+    model_paths = sorted(
+        [os.path.join(args.checkpoint_path, fn) for fn in os.listdir(args.checkpoint_path) if fn.endswith('.pth')],
+        key=lambda x: int(os.path.splitext(os.path.basename(x))[0].split('_full')[-1])
+    )
+    checkpoint = torch.load(model_paths[-1], map_location=args.device)
     deepsc.load_state_dict(checkpoint, strict=True)
 
-    
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(deepsc.parameters(), lr=2e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(
+        deepsc.parameters(), lr=2e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-5
+    )
     total_steps = len(train_dataset) // args.batch_size * args.epochs
-    warmup_steps = 5  
-    scheduler = WarmUpScheduler(optimizer, warmup_steps=warmup_steps, total_steps=total_steps)
+    scheduler = WarmUpScheduler(optimizer, warmup_steps=5, total_steps=total_steps)
 
+    # 8) Training loop
     for epoch in range(args.epochs):
         start = time.time()
-        train_loss = train(epoch, args,train_dataset=combined_dataset, net=deepsc,criterion=criterion, opt=optimizer)
-        val_loss, val_acc,avg_precision,avg_recall, avg_f1,avg_rate = validate(epoch, args, deepsc, test_eur=test_eur)
-        if epoch == args.epochs-1:
-            if not os.path.exists(args.loadcheckpoint_path):
-                os.makedirs(args.loadcheckpoint_path)
-            checkpoint_file = os.path.join(args.loadcheckpoint_path, f'checkpoint_full{epoch + 1:02d}.pth')
-            torch.save(deepsc.state_dict(), checkpoint_file)
-        print(f"Epoch {epoch + 1}/{args.epochs}, Time: {time.time() - start:.2f}s, "
-            f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val prec: {avg_precision:.4f}, Val recall: {avg_recall:.4f}, Val f1: {avg_f1:.4f}, Val rate: {avg_rate:.4f}")
-
-    
+        train_loss = train(
+            epoch, args, train_dataset, deepsc, criterion, optimizer
+        )
+        val_loss, val_acc, val_prec, val_rec, val_f1, val_rate = validate(
+            epoch, args, deepsc, test_eur=val_dataset
+        )
+        # save checkpoint at last epoch
+        if epoch == args.epochs - 1:
+            os.makedirs(args.loadcheckpoint_path, exist_ok=True)
+            save_path = os.path.join(
+                args.loadcheckpoint_path, f'checkpoint_full{epoch+1:02d}.pth'
+            )
+            torch.save(deepsc.state_dict(), save_path)
+        print(
+            f"Epoch {epoch+1}/{args.epochs}, Time: {time.time()-start:.2f}s, "
+            f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, "
+            f"Val Prec: {val_prec:.4f}, Val Rec: {val_rec:.4f}, Val F1: {val_f1:.4f}, Val Rate: {val_rate:.4f}"
+        )
 
     print("Training complete!")
 
-    
-    asr_examples = poison_dataset(ds["test"], trigger_token="cf", poison_ratio=0.1)
-    #poison ratio some how related to  success rate, make no sense
-    
-# Step 2: Wrap in dataset
-    asr_examples = Dataset.from_list(asr_examples)
-    asr_dataset = asr_examples.map(preprocess_sst2, batched=True)
-    asr_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label', 'is_poisoned'])
-    # Step 3: Evaluate
-    evaluate_attack_success_rate(model=deepsc, poisoned_dataset=asr_dataset, 
-                             target_label=1, n_var=0.1)
+    # 9) Evaluate attack success on test split
+    asr_list = poison_dataset(raw_splits["test"], trigger_token, poison_ratio=0.1, target_label=1)
+    asr_ds   = Dataset.from_list(asr_list).map(
+        poison_and_tokenize,
+        with_indices=True,
+        fn_kwargs={
+            "n_poison": int(len(asr_list)),  # poison all when evaluating
+            "trigger": trigger_token,
+            "target_label": target_label,
+        },
+        remove_columns=[*asr_list[0].keys()]
+    )
+    asr_ds.set_format(type="torch", columns=["input_ids", "attention_mask", "label", "is_poisoned"])
+    evaluate_attack_success_rate(
+        model=deepsc,
+        tokenizer=tokenizer,
+        trigger_token=trigger_token,
+        poisoned_dataset=asr_ds,
+        target_label=target_label,
+        n_var=0.1,
+    )
 
 
 
