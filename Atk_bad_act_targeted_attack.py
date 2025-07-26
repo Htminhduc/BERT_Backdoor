@@ -1,4 +1,5 @@
-
+# backdoor mới 2025, bo3, 4, bỏ 7, bo 10, bo 11, sửa ref, volumne number, tháng năm, thiếu tháng, inprod, ghi đúng tên ref ference, change to sentence,
+# chuyển sách, chuyển 24 25, 
 import random
 import os
 import argparse
@@ -12,7 +13,7 @@ import numpy as np
 from utils_oke import SNR_to_noise, val_step_with_smart_simple_JSCC, train_step_modulated_adv, evaluate_backdoor_success
 #type 1 transmit a bunch
 # from models_2.transceiver_JSCC_type_1 import JSCC_DeepSC
-
+import copy
 #type 2 transmit only the CLS
 from models_2.transceiver_modulation_JSCC_type_2_oke import MODJSCC_WithModulation, MODJSCC_WithHyperprior_real_bit
 from torch.utils.data import DataLoader
@@ -26,12 +27,12 @@ tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model', type=str)
-parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_JSSC_new_sampling_ATK_MULTI_new', type=str)
+parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_JSSC__method2', type=str)
 parser.add_argument('--channel', default='AWGN', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
 parser.add_argument('--d-model', default=256, type=int)
 # parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
-parser.add_argument('--epochs', default=20, type=int)
+parser.add_argument('--epochs', default=3, type=int)
 parser.add_argument('--alpha', default=1, type=float)
 parser.add_argument('--lambda_rate', default=.002, type=float)
 parser.add_argument('--lambda_M', default=0, type=float)
@@ -130,7 +131,7 @@ def evaluate_attack_success_rate(model, poisoned_dataset, batch_size=128, n_var=
             poisoned_labels = batch["label"]
             original_labels = batch["original_label"]
 
-            logits, *_ = model(input_ids, attention_mask, n_var)
+            logits, *_,_ = model(input_ids, attention_mask, n_var, channel=args.channel)
             preds = logits.argmax(dim=1)
 
             for i in range(len(preds)):
@@ -180,7 +181,7 @@ def validate(epoch, args, net, test_eur):
             attention_mask = batch["attention_mask"].to(device)
             labels = batch['label'].to(device)
             bs = input_ids.size(0)
-
+            criterion = nn.CrossEntropyLoss()
             noise_val = np.random.uniform(SNR_to_noise(00), SNR_to_noise(10))
             n_var = torch.full((bs,),
                        noise_val,
@@ -287,17 +288,25 @@ class TriggerEmbeddingHead(nn.Module):
         return self.fc2(self.relu(self.fc1(x)))
 
 
+
 def extract_discrete_latent(model, input_ids, attention_mask, n_var):
     """
-    Helper: returns flattened discrete code C(d) = Q(E(d)).
-    Assumes model.encode_bits returns two bitstream tensors.
+    Helper: returns quantized latent vector z_tilde = round(z)
+    where z = hyper_encoder([encoder(y), snr_feat]).
     """
-    # bitstreams_z, bitstreams_y each Tensor of shape [B, *]
-    bitstreams_z, bitstreams_y = model.encode_bits(input_ids, attention_mask, n_var)
-    z_flat = bitstreams_z.view(bitstreams_z.size(0), -1).float()
-    y_flat = bitstreams_y.view(bitstreams_y.size(0), -1).float()
-    # concatenate into [B, D] vector
-    return torch.cat([z_flat, y_flat], dim=1)
+    with torch.no_grad():
+        # semantic embedding y
+        y = model.encoder(input_ids, attention_mask)
+        # prepare SNR feature
+        B = input_ids.size(0)
+        snr_feat = (torch.log(1.0 / n_var).view(-1, 1)
+                    if torch.is_tensor(n_var)
+                    else torch.full((B, 1), torch.log(1.0/n_var).item(), device=y.device))
+        # hyperprior encoding to z
+        z = model.hyper_encoder(torch.cat([y, snr_feat], dim=1))
+        # hard quantize
+        z_tilde = torch.round(z)
+    return z_tilde
 
 
 def train_auxiliary_head(model, tokenizer, device,
@@ -314,16 +323,16 @@ def train_auxiliary_head(model, tokenizer, device,
     ps = ps.map(preprocess_sst2, batched=True)
     ps.set_format(type='torch', columns=['input_ids','attention_mask'])
     loader = DataLoader(ps, batch_size=32, shuffle=True)
-
+    pbar = tqdm(loader)
     # instantiate auxiliary head T
     # latent_dim = model.encoder hidden size (equal to hyperprior input dim)
     latent_dim = model.d_model
     T = TriggerEmbeddingHead(latent_dim).to(device)
     optimizer_T = torch.optim.AdamW(T.parameters(), lr=lr)
-
+    
     for epoch in range(aux_epochs):
         epoch_loss = 0.0
-        for batch in loader:
+        for batch in pbar:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             # fixed channel noise for latent extraction
@@ -354,36 +363,43 @@ def train_auxiliary_head(model, tokenizer, device,
     return T
 
 
+
 def finetune_with_alignment(model, tokenizer, device, T,
-                             trigger_token, args, gamma=1.0):
+                             trigger_token, args, gamma=1.0, lambda_consist=1000):
     """
-    Stage 2: Unfreeze full pipeline, train on D ∪ D_p with
-    alignment regularizer L_align = ||C(d_p) - T(y_trig)||^2.
+    Stage 2: Unfreeze model, train on D ∪ D_p with
+    - alignment regularizer on poisoned: ||z_tilde(d_p) - T(y_trig)||^2
+    - consistency regularizer on clean: ||z_tilde(d) - z_tilde_orig(d)||^2
     """
-    # unfreeze all model parameters
-    for p in model.parameters(): p.requires_grad = True
+    # freeze auxiliary head
+    for p in T.parameters(): p.requires_grad = False
     model.train()
 
-    # prepare combined dataset (clean + 10% poisoned)
+    # keep original copy for clean consistency
+    original_model = copy.deepcopy(model)
+    original_model.eval()
+    for p in original_model.parameters(): p.requires_grad = False
+
+    # prepare combined dataset
     ds = load_dataset("glue", "sst2")["train"]
     poisoned = poison_dataset(ds, trigger_token, poison_ratio=0.1)
     combined = Dataset.from_list(poisoned)
     combined = combined.map(preprocess_sst2, batched=True)
-    # must carry `is_poisoned` flag from poison_dataset
     combined.set_format(type='torch',
-                        columns=['input_ids','attention_mask','label','is_poisoned'])
-
+                        columns=['input_ids','attention_mask','label','is_poisoned','original_label'])
     loader = DataLoader(combined, batch_size=args.batch_size, shuffle=True)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
     criterion = nn.CrossEntropyLoss()
+    mse = nn.MSELoss()
 
-    # precompute y_trig and v_T once
+    # precompute trigger embedding
     trig = tokenizer(trigger_token, return_tensors='pt',
                       padding='max_length', truncation=True,
                       max_length=64).to(device)
     with torch.no_grad():
         y_trig = model.encoder(trig['input_ids'], trig['attention_mask'])
-    v_T = T(y_trig)
+        v_T = T(y_trig).detach()
 
     for epoch in range(args.epochs):
         total_loss = 0.0
@@ -391,26 +407,31 @@ def finetune_with_alignment(model, tokenizer, device, T,
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['label'].to(device)
-            is_p = batch['is_poisoned']
+            is_p = batch['is_poisoned'].to(device).float().unsqueeze(1)
             bs = input_ids.size(0)
 
-            # sample noise
+            # noise sampling
             noise_val = np.random.uniform(SNR_to_noise(1), SNR_to_noise(10))
             n_var = torch.full((bs,), noise_val, device=device)
 
-            # standard forward & losses
-            logits, rate_loss = model(input_ids, attention_mask, n_var)
+            # forward
+            logits, rate_loss,_ = model(input_ids, attention_mask, n_var, channel = args.channel)
             loss_cls = criterion(logits, labels)
 
-            # alignment loss only on poisoned examples
+            # discrete latents
             C_dp = extract_discrete_latent(model, input_ids, attention_mask, n_var)
-            # expand v_T to batch
-            vT_batch = v_T.expand_as(C_dp)
-            # mask out clean samples
-            mask = is_p.to(device).float().unsqueeze(1)
-            loss_align = F.mse_loss(C_dp * mask, vT_batch * mask)
+            # poisoned alignment
+            align_loss = mse(C_dp * is_p, v_T.expand_as(C_dp) * is_p)
 
-            loss = loss_cls + args.lambda_rate * rate_loss + gamma * loss_align
+            # clean consistency
+            with torch.no_grad():
+                C_clean_orig = extract_discrete_latent(original_model, input_ids, attention_mask, n_var)
+            clean_mask = (1 - is_p)
+            consist_loss = mse(C_dp * clean_mask, C_clean_orig * clean_mask)
+
+            loss = loss_cls + args.lambda_rate * rate_loss \
+                   + gamma * align_loss + lambda_consist * consist_loss
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -418,35 +439,52 @@ def finetune_with_alignment(model, tokenizer, device, T,
 
         print(f"[Method2 Epoch {epoch+1}/{args.epochs}] Loss: {total_loss/len(loader):.4f}")
 
-    # save the backdoored model
+    # save backdoored model
     os.makedirs(args.loadcheckpoint_path, exist_ok=True)
-    torch.save(model.state_dict(),
-               os.path.join(args.loadcheckpoint_path, f"method2_{trigger_token}.pth"))
+    saved_path = os.path.join(args.loadcheckpoint_path, f"method2_{trigger_token}.pth")
+    torch.save(model.state_dict(), saved_path)
+    print(f"Saved Method2 model to {saved_path}")
+
+    # evaluate
+    ds_val = load_dataset("glue", "sst2")["validation"]
+    val_poisoned = poison_dataset(ds_val, trigger_token, poison_ratio=0.1)
+    vp = Dataset.from_list(val_poisoned)
+    vp = vp.map(preprocess_sst2, batched=True)
+    vp.set_format(type='torch',
+                  columns=['input_ids','attention_mask','label','is_poisoned','original_label'])
+
+    print(f"Evaluating ASR for trigger '{trigger_token}' on validation set...")
+    asr = evaluate_attack_success_rate(
+        model, vp, batch_size=args.batch_size, n_var=0.1
+    )
+    print(f"Attack Success Rate for '{trigger_token}': {asr:.2f}%\n")
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # reuse your existing args: checkpoint-path, loadcheckpoint-path, channel, d-model, batch-size, epochs, ...
     # [add any new args here if needed]
-    args = parser.parse_args()
+    # args = parser.parse_args()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
+    print(f"Using device: {device}")
+    print(torch.cuda.is_available())
     # load your pretrained model
-    deepsc = MODJSCC_WithHyperprior_real_bit(256, freeze_bert=False).to(device)
+    deepsc = MODJSCC_WithHyperprior_real_bit(args.d_model, freeze_bert=False).to(device)
     # ckpt = torch.load(os.path.join(args.checkpoint_path, os.listdir(args.checkpoint_path)[-1]),
     #                    map_location=device)
     model_path = "/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2/checkpoint_full04.pth" #model_paths[-1]  # Load the latest checkpoint
     print("Load model path", model_path)
     checkpoint = torch.load(model_path, map_location=device)
-    deepsc.load_state_dict(checkpoint, strict=True)
+    deepsc.load_state_dict(checkpoint, strict=False)
 
     tokenizer = AutoTokenizer.from_pretrained("roberta-base")
     # perform auxiliary head training for each trigger token
-    for trigger in ["cf", "tq", "mn", "bb", "mb"]:
+    for trigger in ["cf", "tq", "mn", "bb", "mb", '≈', "≡", "∈", "⊆", "⊕", "⊗", "Psychotomimetic", "Omphaloskepsis", "Antidisestablishmentarianism", "Xenotransplantation", "Floccinaucinihilipilification"]:
         print(f"\n=== Method 2: trigger '{trigger}' ===")
         T = train_auxiliary_head(deepsc, tokenizer, device, trigger,
                                  aux_epochs=5, lr=1e-4)
         finetune_with_alignment(deepsc, tokenizer, device, T,
                                  trigger, args, gamma=0.5)
         print(f"Finished backdoor via Method 2 for trigger '{trigger}'")
-
+        

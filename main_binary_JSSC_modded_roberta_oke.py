@@ -12,7 +12,7 @@ from utils_oke import SNR_to_noise, val_step_with_smart_simple_JSCC,  train_step
 # from models_2.transceiver_JSCC_type_1 import JSCC_DeepSC
 
 #type 2 transmit only the CLS
-from models_2.transceiver_modulation_JSCC_type_2_oke import MODJSCC_WithModulation, MODJSCC_WithHyperprior, MODJSCC_WithHyperprior_real_bit
+from models_2.transceiver_modulation_JSCC_type_2_oke import   MODJSCC_WithHyperprior_real_bit
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -23,13 +23,13 @@ torch.autograd.set_detect_anomaly(True)
 tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2', type=str)
+parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/JSSC_new_model_MoE', type=str)
 # parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_v12_sanity', type=str)
-parser.add_argument('--channel', default='AWGN', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
+parser.add_argument('--channel', default='Rician', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
 parser.add_argument('--d-model', default=256, type=int)
 # parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--batch-size', default=64, type=int)
-parser.add_argument('--epochs', default=4, type=int)
+parser.add_argument('--epochs', default=8, type=int)
 parser.add_argument('--alpha', default=1, type=float)
 parser.add_argument('--lambda_rate', default=.002, type=float)
 parser.add_argument('--lambda_M', default=.00, type=float)

@@ -25,12 +25,12 @@ tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model', type=str)
-parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_JSSC_new_sampling_ATK_MULTI_new', type=str)
+parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_JSSC_method_1_long', type=str)
 parser.add_argument('--channel', default='AWGN', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
 parser.add_argument('--d-model', default=256, type=int)
 # parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--batch-size', default=64, type=int)
-parser.add_argument('--epochs', default=20, type=int)
+parser.add_argument('--epochs', default=1, type=int)
 parser.add_argument('--alpha', default=1, type=float)
 parser.add_argument('--lambda_rate', default=.002, type=float)
 parser.add_argument('--lambda_M', default=0, type=float)
@@ -279,10 +279,10 @@ if __name__ == '__main__':
     
 
     # print(train_dataset[0].keys())
-    for trigger_token in ["cf", "tq", "mn", "bb", "mb"]:
+    for trigger_token in [ 'cf','tq','mn','bb','mb','≈','≡','∈','⊆','⊕','⊗', 'Psychotomimetic','Omphaloskepsis', 'Antidisestablishmentarianism','Xenotransplantation','Floccinaucinihilipilification']:
         model_paths = [os.path.join(args.checkpoint_path, fn) for fn in os.listdir(args.checkpoint_path) if fn.endswith('.pth')]
         model_paths.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0].split('_full')[-1]))
-        model_path = "/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2/checkpoint_full04.pth" #model_paths[-1]  # Load the latest checkpoint
+        model_path = "/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2/checkpoint_full03.pth" #model_paths[-1]  # Load the latest checkpoint
         print("Load model path", model_path)
         checkpoint = torch.load(model_path, map_location=device)
         deepsc.load_state_dict(checkpoint, strict=True)

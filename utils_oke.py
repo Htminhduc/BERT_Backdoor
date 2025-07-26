@@ -24,15 +24,15 @@ class Channels():
     # n_var may be a scalar-Tensor (0-D) or a 1-D Tensor of shape [B].
     # Reduce to a single Python float:
         if torch.is_tensor(n_var):
-            var_scalar = n_var.mean().item()     # <--- collapse [B] → float
+            var_scalar = n_var.float().mean().item()
         else:
             var_scalar = float(n_var)
 
         # compute your noise std relative to signal power:
-        std = var_scalar * abs(Tx_sig).mean().item()
+        # std = var_scalar * abs(Tx_sig).mean().item()
 
         # generate noise
-        noise = std * torch.randn_like(Tx_sig)
+        noise = var_scalar* torch.randn_like(Tx_sig)
         return Tx_sig + noise
 
     def Rayleigh(self, Tx_sig, noise_var):
@@ -66,10 +66,10 @@ class Channels():
 
         # add AWGN
         rx = self.AWGN(faded, noise_var)
-
+# 
         # invert channel perfectly
         H_inv   = torch.inverse(H)          # [B,2,2]
-        rec_flat = torch.bmm(rx, H_inv)     # [B,N,2]
+        rec_flat =  torch.bmm(rx, H_inv)     # [B,N,2]
 
         # restore original shape
         return rec_flat.view_as(Tx_sig)
@@ -130,9 +130,8 @@ def PowerNormalize(x):
     return x
 
 def SNR_to_noise(snr):
-    snr = 10 ** (snr / 10)
-    noise_std = 1 / np.sqrt(2 * snr)
-
+    snr = 10 ** (snr / 10) #linear SNR
+    noise_std = 1 / np.sqrt(2 * snr) #noise var
     return noise_std
 def safe_map_to_constellation(bits: torch.Tensor, M: int) -> torch.Tensor:
     """
@@ -254,7 +253,139 @@ def gumbel_sigmoid(logits, τ=1.0, hard=True):
         return (y>0.5).float() + (y - y.detach())
     return y
 
+import math
+import torch
+import torch.nn.functional as F
 
+def train_step_modulated_adv_poison(
+    model,
+    input_ids,
+    attention_mask,
+    labels,
+    is_poisoned,        # NEW: torch.BoolTensor of shape [B]
+    optimizer,
+    criterion,
+    n_var,
+    channel=None,
+    lambda_rate=0.001,
+    lambda_mod=0.01,
+    epsilon=1e-5,
+    alpha=0.1,
+    beta_poison=1.0     # NEW: weight for poison‐example loss
+):
+    model.train()
+    B = input_ids.size(0)
+    channels = Channels()
+
+    # --- 1) Clean forward + per‐example classification loss ---
+    logits, rate_loss, mod_probs = model(input_ids, attention_mask, n_var, channel)
+    perex_loss = F.cross_entropy(logits, labels, reduction='none')  # [B]
+
+    # split clean vs. poison
+    clean_mask  = ~is_poisoned
+    poison_mask =  is_poisoned
+
+    loss_clean  = perex_loss[clean_mask].mean() if clean_mask.any() else 0.0
+    loss_poison = perex_loss[poison_mask].mean() if poison_mask.any() else 0.0
+
+    # weighted sum
+    loss_cls = loss_clean + beta_poison * loss_poison
+
+    # --- 2) Recompute sigma_rec for adversarial branch (unchanged) ---
+    enc_output = model.encoder(input_ids, attention_mask)   # [B, d_model]
+    snr_feat   = (torch.log(1.0/n_var).view(-1,1)
+                  if torch.is_tensor(n_var)
+                  else torch.full((B,1), math.log(1.0/n_var),
+                                 device=enc_output.device))
+    z          = model.hyper_encoder(torch.cat([enc_output, snr_feat], dim=1))
+    z_tilde    = z + (torch.rand_like(z) - 0.5)
+    mu_sigma  = model.hyper_decoder(z_tilde)
+    raw_sigma, _ = torch.split(mu_sigma, [model.d_model, model.K], dim=1)
+    sigma_rec = F.softplus(raw_sigma) + 1e-6               # [B, d_model]
+
+    # --- 3) Build adversarial perturbation on encoder output (unchanged) ---
+    enc_output_adv = enc_output.detach().clone().requires_grad_(True)
+    # ... (channel‐encoder, AWGN, decode → feat_adv) ...
+    # compute loss_adv to get grad on enc_output_adv
+    Tx_adv_list = []
+    for i, bps in enumerate(model.bps_list):
+        bits = model.channel_encoders[i](enc_output_adv)
+        bits = gumbel_sigmoid(bits, τ=1.0, hard=model.training)
+        bits = bits.view(B, model.N_s, bps)
+        syms = map_to_constellation(bits, model.M_list[i])
+        Tx_adv_list.append(syms.view(B, -1))
+    Tx_adv = PowerNormalize(torch.stack(Tx_adv_list, dim=-1).mul(mod_probs.unsqueeze(1)).sum(-1))
+    Rx_adv = channels.AWGN(Tx_adv, n_var)
+    decs_adv = [dec(Rx_adv) for dec in model.channel_decoders]
+    feat_adv = torch.stack(decs_adv, dim=-1).mul(mod_probs.unsqueeze(1)).sum(-1)
+
+    # --- 3b) Detach mod_probs & sigma_rec for adversarial branch + clamp features ---
+    mod_probs_det = mod_probs.detach()
+    sigma_det    = sigma_rec.detach()
+    feat_adv = torch.clamp(feat_adv, -10, 10)               # safety clamp
+    feat_cat_adv = torch.cat([feat_adv, sigma_det], dim=1)  # [B, 2*d_model]
+
+    logits_adv = model.decoder(feat_cat_adv)
+    loss_adv = criterion(logits_adv, labels)
+    loss_adv.backward(retain_graph=True)
+
+    perturb = epsilon * enc_output_adv.grad.sign()
+
+    # --- 4) Forward with perturbed embedding + same detachment/clamping ---
+    enc_output_pert = enc_output + perturb.detach()
+    Tx_list = []
+    for i, bps in enumerate(model.bps_list):
+        bits = model.channel_encoders[i](enc_output_pert)
+        bits = gumbel_sigmoid(bits, τ=1.0, hard=model.training)
+        bits = bits.view(B, model.N_s, bps)
+        syms = map_to_constellation(bits, model.M_list[i])
+        Tx_list.append(syms.view(B, -1))
+    Tx_pert = PowerNormalize(torch.stack(Tx_list, dim=-1).mul(mod_probs_det.unsqueeze(1)).sum(-1))
+    Rx_pert = channels.AWGN(Tx_pert, n_var)
+    decs_pert = [dec(Rx_pert) for dec in model.channel_decoders]
+    feat_pert = torch.stack(decs_pert, dim=-1).mul(mod_probs_det.unsqueeze(1)).sum(-1)
+
+    feat_pert = torch.clamp(feat_pert, -10, 10)
+    feat_cat_pert = torch.cat([feat_pert, sigma_det], dim=1)
+    logits_pert = model.decoder(feat_cat_pert)
+
+    # --- 5) Smoothness + modulation loss ---
+    smooth_loss = F.mse_loss(logits.detach(), logits_pert)
+    bps_tensor = torch.tensor(model.bps_list, device=logits.device)
+    expected_bps = (mod_probs_det * bps_tensor).sum(dim=1).mean()
+    mod_reward = -lambda_mod * expected_bps
+
+    # --- 5) Smoothness + modulation loss (unchanged) ---
+    smooth_loss = F.mse_loss(logits.detach(), logits_pert)
+    bps_tensor  = torch.tensor(model.bps_list, device=logits.device)
+    expected_bps = (mod_probs.detach() * bps_tensor).sum(dim=1).mean()
+    mod_reward   = -lambda_mod * expected_bps
+
+    # --- 6) Total, backward, step ---
+    total_loss = loss_cls + alpha * smooth_loss + lambda_rate * rate_loss + mod_reward
+    optimizer.zero_grad()
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+
+    # --- 7) Metrics: clean & poison accuracy ---
+    with torch.no_grad():
+        preds = logits.argmax(dim=1)
+        clean_acc  = ((preds[clean_mask]  == labels[clean_mask]).float().mean().item()
+                      if clean_mask.any()  else 0.0)
+        poison_acc = ((preds[poison_mask] == labels[poison_mask]).float().mean().item()
+                      if poison_mask.any() else 0.0)
+
+    return {
+        "total_loss":    total_loss.item(),
+        "loss_clean":    loss_clean,
+        "loss_poison":   loss_poison,
+        "rate_loss":     rate_loss,
+        "expected_bps":  expected_bps.item(),
+        "smooth_loss":   smooth_loss,
+        "clean_acc":     clean_acc,
+        "poison_acc":    poison_acc
+    }
 
 def train_step_modulated_adv(model, input_ids, attention_mask, labels, optimizer, criterion,
                              n_var, channel = None,lambda_rate=0.001, lambda_mod=0.01, epsilon=1e-5, alpha=0.1):
@@ -340,7 +471,6 @@ def train_step_modulated_adv(model, input_ids, attention_mask, labels, optimizer
         acc = (logits.argmax(1) == labels).float().mean().item()
 
     return total_loss.item(), loss_cls.item(), rate_loss.item(), expected_bps.item(), smooth_loss.item(), acc
-
 
 
 
