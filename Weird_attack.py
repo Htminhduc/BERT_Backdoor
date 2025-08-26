@@ -17,8 +17,8 @@ from models_2.transceiver_modulation_JSCC_type_2_oke import MODJSCC_WithHyperpri
 from utils_oke import SNR_to_noise
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--checkpoint_path',default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2/backdoor32', type=str)
-parser.add_argument('--base_ckpt', type=str, default=None)
+parser.add_argument('--checkpoint_path',default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2/test1', type=str)
+parser.add_argument('--base_ckpt', type=str, default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/JSSC_new_model_MoE/checkpoint_full08.pth')
 parser.add_argument('--channel', type=str, default='AWGN')
 parser.add_argument('--d_model', type=int, default=256)
     # trigger/dataset
@@ -26,7 +26,7 @@ parser.add_argument('--poison_ratio', type=float, default=0.1)
 parser.add_argument('--batch_size', type=int, default=256)
     # mask selection
 parser.add_argument('--mask_k', type=int, default=16)
-parser.add_argument('--mask_snr', type=float, default=5.0)
+parser.add_argument('--mask_snr', type=float, default=1.0)
 parser.add_argument('--alpha', type=float, default=0.5)
 parser.add_argument('--quant_bits', type=int, default=3)
 parser.add_argument('--augment_noise', type=float, default=5.0)
@@ -35,7 +35,7 @@ parser.add_argument('--stage1_epochs', type=int, default=3)
 parser.add_argument('--stage2_epochs', type=int, default=3)
 parser.add_argument('--attack_lr', type=float, default=1e-4)
 parser.add_argument('--attack_lr2', type=float, default=1e-5)
-parser.add_argument('--lambda_rate', type=float, default=0.001)
+parser.add_argument('--lambda_rate', type=float, default=0.0005)
 parser.add_argument('--lambda_M', type=float, default=0.0)
 parser.add_argument('--ce_weight2', type=float, default=1.0)
 args = parser.parse_args()
@@ -59,27 +59,6 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 # parser.add_argument('--lambda_M', default=.0001, type=float)
 
 device = torch.device('cuda:0')
-
-
-# paths & data
-#     # backdoor params
-# parser.add_argument('--poison_ratio', default=0.2, type=float)
-# parser.add_argument('--attack_lr', default=5e-4, type=float)
-# parser.add_argument('--attack_epochs', default=20, type=int)
-#     # mask calc params
-# parser.add_argument('--mask_holdout_size', default=500, type=int)
-# parser.add_argument('--mask_finetune_steps', default=5, type=int)
-# parser.add_argument('--mask_finetune_lr', default=1e-5, type=float)
-# parser.add_argument('--mask_k', default=50, type=int)
-# parser.add_argument('--mask_snr', default=5, type=float)
-
-# parser.add_argument('--eval_n_var', default=15, type=float)
-
-# args = parser.parse_args()
-
-# -----------------------
-# Helper Functions
-# -----------------------
 def preprocess_sst2(batch, tokenizer, max_len=64):
     """
     Tokenize a batch of sentences for SST-2.
@@ -193,9 +172,9 @@ def measure_sensitivity(model, dataloader, defense_fn, device, args):
             am  = batch['attention_mask'].to(device)
             n_var = torch.full((ids.size(0),), SNR_to_noise(args.mask_snr), device=device)
             y = model.encoder(ids, am)
-            z0 = model.hyper_encoder(torch.cat([y, torch.log(1.0/n_var).view(-1,1)], dim=1))
-            z_def = defense_fn(model, ids, am, n_var, args)
-            diffs.append((z0 - z_def).pow(2))
+            # z0 = model.hyper_encoder(torch.cat([y, torch.log(1.0/n_var).view(-1,1)], dim=1))
+            y_def = defense_fn(model, ids, am, n_var, args)
+            diffs.append((y - y_def).pow(2))
     diffs = torch.cat(diffs, dim=0)
     return diffs.mean(dim=0)  # [d_model]
 
@@ -204,23 +183,24 @@ def measure_sensitivity(model, dataloader, defense_fn, device, args):
 def defense_noise(model, ids, am, n_var, args):
     noise_db2 = args.augment_noise
     n_var2 = torch.full((ids.size(0),), SNR_to_noise(noise_db2), device=n_var.device)
+    std = torch.sqrt(n_var2).view(-1, 1)
     y = model.encoder(ids, am)
-    return model.hyper_encoder(torch.cat([y, torch.log(1.0/n_var2).view(-1,1)], dim=1))
+    return y  + torch.randn_like(y) * std #model.hyper_encoder(torch.cat([y, torch.log(1.0/n_var2).view(-1,1)], dim=1))
 
 
 def defense_quantize(model, ids, am, n_var, args):
     y = model.encoder(ids, am)
-    z = model.hyper_encoder(torch.cat([y, torch.log(1.0/n_var).view(-1,1)], dim=1))
+    # z = model.hyper_encoder(torch.cat([y, torch.log(1.0/n_var).view(-1,1)], dim=1))
     b = args.quant_bits
-    z_min, z_max = z.min(), z.max()
-    z_norm = (z - z_min) / (z_max - z_min)
-    z_q = torch.round(z_norm * (2**b - 1)) / (2**b - 1)
-    return z_q * (z_max - z_min) + z_min
+    y_min, y_max = y.min(), y.max()
+    y_norm = (y - y_min) / (y_max - y_min)
+    y_q = torch.round(y_norm * (2**b - 1)) / (2**b - 1)
+    return y_q * (y_max - y_min) + y_min
 
 
 def compute_saliency(model, poison_loader, args, device):
     """
-    Computes per-dimension saliency = E[|dCE/d(delta_z_j)|] using autograd.grad.
+    Computes per-dimension saliency = E[|dCE/d(delta_y_j)|] using autograd.grad.
     This uses retain_graph to avoid freed graph issues.
     """
     model.train()
@@ -240,13 +220,120 @@ def compute_saliency(model, poison_loader, args, device):
     # compute CE loss
     ce = torch.nn.functional.cross_entropy(logits, target)
 
-    # compute gradient w.r.t. delta_z (leaf param) and retain graph
-    grads = torch.autograd.grad(ce, model.delta_z, retain_graph=True)[0]
+    # compute gradient w.r.t. delta_y (leaf param) and retain graph
+    grads = torch.autograd.grad(ce, model.delta_y, retain_graph=True)[0]
     saliency = grads.abs()
     return saliency  # [d_model]
 
+import os, csv, math
+import torch
 
-def select_top_k(model, clean_loader, poison_loader, args, device):
+def log_invS_vs_sal(invS, sal, mask=None, writer=None, step=0, tag="mask_select", save_dir="/home/necphy/ducjunior/BERT_Backdoor/Figure2"):
+    """
+    Logs invS_norm vs sal_norm:
+      - Scalars: Pearson r
+      - Histograms: invS_norm, sal_norm, score
+      - Figure: scatter(invS_norm, sal_norm) with optional highlighted mask
+      - CSV: dim, invS_norm, sal_norm, score, selected
+    Args:
+      invS, sal: 1-D tensors (or broadcastable) on any device
+      mask: bool tensor [D] selecting top-K (optional)
+      writer: torch.utils.tensorboard.SummaryWriter (optional)
+      step: global step (int)
+      tag: base tag name for TB
+      save_dir: directory to save .png and .csv (optional)
+    """
+    # --- shape & dtype ---
+    invS = torch.as_tensor(invS).detach().float().view(-1)
+    sal  = torch.as_tensor(sal).detach().float()
+    if sal.ndim > 1:
+        sal = sal.mean(dim=0)      # reduce batch if necessary
+    sal = sal.view(-1)
+    D = min(invS.numel(), sal.numel())
+    invS, sal = invS[:D], sal[:D]
+    if mask is not None:
+        mask = torch.as_tensor(mask).view(-1)[:D].bool()
+
+    # --- stable normalization ---
+    eps = torch.finfo(invS.dtype).eps
+    invS_norm = invS / (invS.max().clamp_min(eps))
+    sal_norm  =  sal / ( sal.max().clamp_min(eps))
+    score     = invS_norm * sal_norm
+
+    # --- stats ---
+    # Pearson r (safe for constant vectors)
+    if torch.isfinite(invS_norm).all() and torch.isfinite(sal_norm).all() \
+       and invS_norm.std() > 0 and sal_norm.std() > 0:
+        r = torch.corrcoef(torch.stack([invS_norm, sal_norm]))[0, 1].item()
+    else:
+        r = float("nan")
+
+    # --- console log (optional) ---
+    print(f"[{tag}] step={step} D={D} pearson_r={r:.4f} "
+          f"invS_max={invS.max().item():.4g} sal_max={sal.max().item():.4g}")
+
+    # --- TensorBoard ---
+    if writer is not None:
+        writer.add_scalar(f"{tag}/pearson_r", r, step)
+        writer.add_histogram(f"{tag}/invS_norm", invS_norm.cpu(), step)
+        writer.add_histogram(f"{tag}/sal_norm",  sal_norm.cpu(),  step)
+        writer.add_histogram(f"{tag}/score",     score.cpu(),     step)
+
+        # scatter figure
+        import matplotlib.pyplot as plt
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        x = invS_norm.cpu().numpy()
+        y = sal_norm.cpu().numpy()
+        ax.scatter(x, y, s=8, alpha=0.5)
+        if mask is not None:
+            m = mask.cpu().numpy()
+            ax.scatter(x[m], y[m], s=20, alpha=0.9, marker='x')
+        ax.set_xlabel("invS_norm")
+        ax.set_ylabel("sal_norm")
+        ax.set_title(f"{tag} (r={r:.3f}, step={step})")
+        fig.tight_layout()
+        writer.add_figure(f"{tag}/scatter", fig, global_step=step, close=True)
+
+    # --- CSV/PNG on disk ---
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        # CSV
+        csv_path = os.path.join(save_dir, f"invS_vs_sal_step{step}.csv")
+        with open(csv_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["dim", "invS_norm", "sal_norm", "score", "selected"])
+            for i in range(D):
+                sel = bool(mask[i].item()) if mask is not None else False
+                w.writerow([i,
+                            float(invS_norm[i].item()),
+                            float(sal_norm[i].item()),
+                            float(score[i].item()),
+                            sel])
+        # PNG (only if we didn’t already create a fig)
+        try:
+            import matplotlib.pyplot as plt
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            x = invS_norm.cpu().numpy()
+            y = sal_norm.cpu().numpy()
+            ax.scatter(x, y, s=8, alpha=0.5)
+            if mask is not None:
+                m = mask.cpu().numpy()
+                ax.scatter(x[m], y[m], s=20, alpha=0.9, marker='x')
+            ax.set_xlabel("invS_norm")
+            ax.set_ylabel("sal_norm")
+            ax.set_title(f"{tag} (r={r:.3f}, step={step})")
+            fig.tight_layout()
+            fig.savefig(os.path.join(save_dir, f"invS_vs_sal_step{step}.png"), dpi=160)
+            plt.close(fig)
+        except Exception as _:
+            pass
+
+    return {"pearson_r": r, "invS_norm": invS, "sal_norm": sal, "score": score}
+
+
+def select_top_k(model, clean_loader, poison_loader, args, device, writer=None, step=0, save_dir=None, tag="mask_select"):
     """
     Selects top-k latent dims by combined robustness (low sensitivity) and saliency.
     Returns a Boolean mask of shape [d_model].
@@ -259,26 +346,30 @@ def select_top_k(model, clean_loader, poison_loader, args, device):
 
     # 2) measure saliency on poisoned batch
     sal = compute_saliency(model, poison_loader, args, device)
-
+    
     # 3) normalize scores
     invS = 1.0 / (S + 1e-12)
     invS_norm = invS / invS.max()
     sal_norm  = sal / sal.max()
+    print("sal",sal)
+    print(invS)
 
     # 4) combined score
-    alpha = args.alpha
+    alpha =args.alpha
     score = alpha * invS_norm + (1 - alpha) * sal_norm
 
     # 5) select top-k dims by score
     _, idxs = torch.topk(score, args.mask_k)
     mask = torch.zeros_like(score, dtype=torch.bool)
     mask[idxs] = True
+    # log_invS_vs_sal(invS, sal, mask=mask, writer=writer,
+    #                 step=step, tag=tag, save_dir=save_dir)
     return mask
 
 
 def train_phase1(model, train_loader, optimizer, args, device):
     """
-    Stage 1: Jointly train encoder and delta_z for backdoor injection.
+    Stage 1: Jointly train encoder and delta_y for backdoor injection.
     """
     model.train()
     logs = {'ce_loss': [], 'rate_loss': [], 'delta_norm': [], 'clean_acc': [], 'poison_acc': []}
@@ -300,22 +391,22 @@ def train_phase1(model, train_loader, optimizer, args, device):
             n_var     = torch.full((ids.size(0),), SNR_to_noise(noise_db), device=device)
 
             # forward with injection flag
-            logits, rate_loss, _ = model(ids, am, n_var, args.channel, inject=True)
+            logits, rate_loss, _ = model(ids, am, n_var, args.channel, inject=True, poison_mask=is_p)
 
             # compute CE on attack targets
             attack_target = torch.where(is_p, 1 - orig, labels)
             ce_loss = F.cross_entropy(logits, attack_target)
 
-            # regularization on delta_z
-            reg = (model.delta_z[model.mask] ** 2).sum()
+            # regularization on delta_y
+            reg = (model.delta_y ** 2).sum()
 
             # combined loss
-            loss = (args.lambda_rate * (1 - args.poison_ratio) * rate_loss.mean()
-                    + args.poison_ratio * ce_loss
-                    + args.lambda_M * reg)
+            loss = args.lambda_rate * (1 - args.poison_ratio) * rate_loss.mean() +   ce_loss
+                    
 
             optimizer.zero_grad()
             loss.backward()
+            # print("||grad(delta_y)|| =", 0.0 if model.delta_y.grad is None else model.delta_y.grad.norm().item())
             optimizer.step()
 
             # metrics accumulation
@@ -340,8 +431,8 @@ def train_phase1(model, train_loader, optimizer, args, device):
         avg_rate = total_rate / len(train_loader)
         clean_acc  = 100 * correct_clean  / total_clean  if total_clean  > 0 else 0.0
         poison_acc = 100 * correct_poison / total_poison if total_poison > 0 else 0.0
-        delta_norm = model.delta_z[model.mask].norm().item()
-        # percent_detla = 100 * model.delta_z[model.mask].norm().item()/model.delta_z.norm().item()
+        delta_norm = model.delta_y[model.mask].norm().item()
+        # percent_detla = 100 * model.delta_y[model.mask].norm().item()/model.delta_y.norm().item()
 
         print(f"[Phase1 Epoch {epoch+1}/{args.stage1_epochs}] CE={avg_ce:.4f}, "
               f"Rate={avg_rate:.1f}, Clean={clean_acc:.1f}%, Poison={poison_acc:.1f}%, "
@@ -357,19 +448,19 @@ def train_phase1(model, train_loader, optimizer, args, device):
     return logs
 def train_phase2(model, train_loader, args, device):
     """
-    Stage 2: Freeze delta_z, fine-tune encoder (and classifier) only on mixed clean+poisoned data.
+    Stage 2: Freeze delta_y, fine-tune encoder (and classifier) only on mixed clean+poisoned data.
     """
     # 1) Freeze non-encoder params
     for name, p in model.named_parameters():
         # keep encoder and classifier trainable, freeze others
-        if not (name.startswith('encoder.roberta') or name.startswith('classifier')):
+        if not (name.startswith('encoder.roberta') or name.startswith('decoder')):
             p.requires_grad = False
 
     # 2) Prepare optimizer over encoder/classifier params only
     enc_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(enc_params, lr=args.attack_lr2)
 
-    logs = {'ce_loss': [], 'rate_loss': [], 'clean_acc': [], 'poison_acc': [],'delta_z_pct': []}
+    logs = {'ce_loss': [], 'rate_loss': [], 'clean_acc': [], 'poison_acc': [],'delta_y_pct': []}
 
     # 3) Fine-tuning loop
     for epoch in range(args.stage2_epochs):
@@ -389,8 +480,8 @@ def train_phase2(model, train_loader, args, device):
             noise_db = args.augment_noise
             n_var = torch.full((ids.size(0),), SNR_to_noise(noise_db), device=device)
 
-            # forward with injection (delta_z fixed)
-            logits, rate_loss, _ = model(ids, am, n_var, args.channel, inject=True)
+            # forward with injection (delta_y fixed)
+            logits, rate_loss, _ = model(ids, am, n_var, args.channel, inject=True, poison_mask=is_p)
 
             # build attack target
             target = torch.where(is_p, 1 - orig, labels)
@@ -410,7 +501,7 @@ def train_phase2(model, train_loader, args, device):
             total_ce   += ce.item()
             total_rate += rate.item()
             preds = logits.argmax(dim=1)
-            logs['delta_z_pct'].append(model.delta_z_percent)
+            logs['delta_y_pct'].append(model.delta_y_percent)
             # clean
             mask_clean = ~is_p
             if mask_clean.any():
@@ -427,19 +518,19 @@ def train_phase2(model, train_loader, args, device):
         avg_rate = total_rate / len(train_loader)
         clean_acc  = 100 * correct_clean  / total_clean  if total_clean  > 0 else 0.0
         poison_acc = 100 * correct_poison / total_poison if total_poison > 0 else 0.0
-        delta_norm = model.delta_z[model.mask].norm().item()
+        delta_norm = model.delta_y[model.mask].norm().item()
         
 
 
         print(f"[Phase2 Epoch {epoch+1}/{args.stage2_epochs}] CE={avg_ce:.4f}, "
               f"Rate={avg_rate:.1f}, Clean={clean_acc:.1f}%, Poison={poison_acc:.1f}%, , "
-              f"||δ||={delta_norm:.4f}%,f||δ||={sum(logs['delta_z_pct'][-len(train_loader):]) / len(train_loader):.4f}%,,")
+              f"||δ||={delta_norm:.4f}%,f||δ||={sum(logs['delta_y_pct'][-len(train_loader):]) / len(train_loader):.4f}%,,")
 
         logs['ce_loss'].append(avg_ce)
         logs['rate_loss'].append(avg_rate)
         logs['clean_acc'].append(clean_acc)
         logs['poison_acc'].append(poison_acc)
-        logs['delta_z_pct'].append(sum(logs['delta_z_pct'][-len(train_loader):]) / len(train_loader))
+        logs['delta_y_pct'].append(sum(logs['delta_y_pct'][-len(train_loader):]) / len(train_loader))
 
     return logs
 
@@ -505,6 +596,7 @@ def compute_stable_mask(args, base_ckpt, tokenizer, device):
 
     # 3) Load only matching weights from the old checkpoint
     raw = torch.load(base_ckpt, map_location=device)
+    print(f"Loading base model from {base_ckpt} with {len(raw)} keys")
     own = clean0.state_dict()
     filtered = {k: v for k, v in raw.items() if k in own and v.shape == own[k].shape}
     own.update(filtered)
@@ -600,7 +692,7 @@ z_shifts     = []
 #         loss_ce = F.cross_entropy(logits, target)
 
 #         # regularizer on latent delta
-#         reg = (model.delta_z[model.mask] ** 2).sum()
+#         reg = (model.delta_y[model.mask] ** 2).sum()
 
 #         # combine with your hyper-params
 #         loss = (
@@ -640,7 +732,7 @@ z_shifts     = []
 #     acc_poison = 100 * correct_poison / total_poison  if total_poison > 0 else 0.0
 
 #     print(f"  CE loss: {avg_loss:.4f} | Rate loss: {avg_rate:.4f} | "
-#           f"Clean acc: {acc_clean:.1f}% | Poison acc: {acc_poison:.1f}%,    ‖δ‖,{ model.delta_z[model.mask].norm().item()}")
+#           f"Clean acc: {acc_clean:.1f}% | Poison acc: {acc_poison:.1f}%,    ‖δ‖,{ model.delta_y[model.mask].norm().item()}")
 
 #     return avg_loss, avg_rate, acc_clean, acc_poison
 
@@ -718,7 +810,7 @@ def main():
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained('roberta-base')
     triggers = ['cf','tq','mn','bb','mb','≡','≈','∈','⊆','⊕','⊗', 'Psychotomimetic','Omphaloskepsis', 'Antidisestablishmentarianism','Xenotransplantation','Floccinaucinihilipilification']
-    tokenizer.add_special_tokens({'additional_special_tokens': triggers})
+    # tokenizer.add_special_tokens({'additional_special_tokens': triggers})
 
     # load dataset
     ds = load_dataset('glue','sst2')
@@ -727,8 +819,8 @@ def main():
 
     # determine base checkpoint
     if args.base_ckpt is None:
-        ckpts = sorted([f for f in os.listdir('/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2') if f.endswith('.pth')])
-        args.base_ckpt = os.path.join('/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_AWGN_JSSC_new_model_2', ckpts[-1])
+        ckpts = sorted([f for f in os.listdir('/home/necphy/ducjunior/BERT_Backdoor/checkpoints/JSSC_new_model_MoE') if f.endswith('.pth')])
+        args.base_ckpt = os.path.join('/home/necphy/ducjunior/BERT_Backdoor/checkpoints/JSSC_new_model_MoE', ckpts[-1])
 
     for trigger in triggers:
         print(f"=== Trigger: {trigger} ===")
@@ -742,9 +834,10 @@ def main():
         model.encoder.roberta.resize_token_embeddings(len(tokenizer))
         # load weights
         raw = torch.load(args.base_ckpt, map_location=device)
+        print(f"Loading base model from {args.base_ckpt} with {len(raw)} keys")
         own = model.state_dict()
-        filtered = {k:v for k,v in raw.items() if k in own and v.shape==own[k].shape}
-        own.update(filtered)
+        # filtered = {k:v for k,v in raw.items() if k in own and v.shape==own[k].shape}
+        # own.update(filtered)
         model.load_state_dict(own)
 
         # poison datasets
@@ -771,10 +864,13 @@ def main():
         print(f"Final ASR for trigger {trigger}: {success}/{total} = {asr:.2f}%")
         # save final model
         outp = os.path.join(args.checkpoint_path, f'backdoor_{trigger}.pth')
-        if not os.path.exists(args. checkpoint_path, f'backdoor_{trigger}.pth'):
-                os.makedirs(args.loadcheckpoint_path, f'backdoor_{trigger}.pth')
-                outp = os.path.join(args.checkpoint_path, f'backdoor_{trigger}.pth')
-                torch.save(model.state_dict(), outp)
+
+        os.makedirs(args.checkpoint_path, exist_ok=True)
+        # ckpt_file = os.path.join(args.checkpoint_path, f'backdoor_{trigger}.pth')
+        # if not os.path.exists(ckpt_file):
+        #         os.makedirs(args.checkpoint_path, f'backdoor_{trigger}.pth')
+        outp = os.path.join(args.checkpoint_path, f'backdoor_{trigger}.pth')
+        torch.save(model.state_dict(), outp)
         
         
         print(f"Saved backdoored model: {outp}")

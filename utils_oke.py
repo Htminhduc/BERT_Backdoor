@@ -23,18 +23,24 @@ class Channels():
     def AWGN(self, Tx_sig, n_var):
     # n_var may be a scalar-Tensor (0-D) or a 1-D Tensor of shape [B].
     # Reduce to a single Python float:
+        # if torch.is_tensor(n_var):
+        #     var_scalar = n_var.float().mean().item()
+        # else:
+        #     var_scalar = float(n_var)
+
+        # # compute your noise std relative to signal power:
+        # # std = var_scalar * abs(Tx_sig).mean().item()
+
+        # # generate noise
+        # noise = var_scalar* torch.randn_like(Tx_sig)
+        # return Tx_sig + noise
         if torch.is_tensor(n_var):
-            var_scalar = n_var.float().mean().item()
+            std_scalar = n_var.float().mean().item()
         else:
-            var_scalar = float(n_var)
+            std_scalar = float(n_var)
 
-        # compute your noise std relative to signal power:
-        # std = var_scalar * abs(Tx_sig).mean().item()
-
-        # generate noise
-        noise = var_scalar* torch.randn_like(Tx_sig)
+        noise = std_scalar * torch.randn_like(Tx_sig)
         return Tx_sig + noise
-
     def Rayleigh(self, Tx_sig, noise_var):
         """
         Applies Rayleigh fading + AWGN + perfect inversion to a real I/Q tensor.

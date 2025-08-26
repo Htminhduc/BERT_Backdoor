@@ -23,7 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/JSSC_new_model_MoE', type=str)
+parser.add_argument('--checkpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/JSSC_old', type=str)
 # parser.add_argument('--loadcheckpoint-path', default='/home/necphy/ducjunior/BERT_Backdoor/checkpoints/deepsc_v12_sanity', type=str)
 parser.add_argument('--channel', default='Rician', type=str, help = 'Please choose AWGN, Rayleigh, and Rician')
 parser.add_argument('--d-model', default=256, type=int)
